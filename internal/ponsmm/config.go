@@ -1,8 +1,5 @@
 // Package ponsmm is an automated launch-and-market-make engine for the pons v1
-// launchpad on Robinhood Chain. One wallet launches a fixed-supply token into a
-// locked Uniswap V3 pool; a pool of wallets then accumulates chips, drives the
-// pool toward the graduation threshold, and runs a demand-reactive market-making
-// state machine (accumulate / distribute / oscillate) off live pool trades.
+// direct-to-Uniswap stack and the pons v2 bonding-curve stack on Robinhood Chain.
 //
 // This is a WRITE system: every action spends real ETH and gas. It trades a
 // creator's own token against arriving retail flow. Use it deliberately.
@@ -19,8 +16,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+const (
+	ProtocolV1 = "v1"
+	ProtocolV2 = "v2"
+)
+
 // Config is the full ponsmm configuration, loaded from YAML.
 type Config struct {
+	// Protocol selects the pons launch stack. Empty is treated as v1 for
+	// backward compatibility with configurations written before v2 support.
+	Protocol string `yaml:"protocol"`
 	// RPCEndpoint is the Robinhood Chain RPC. Use a wss:// endpoint so the
 	// engine can subscribe to live pool trades; an http(s) endpoint forces
 	// slower poll-only monitoring.
@@ -38,8 +43,8 @@ type Config struct {
 	LaunchConfigID uint64 `yaml:"launch_config_id"`
 	DexID          uint64 `yaml:"dex_id"`
 
-	// DevBuyETH is an optional atomic initial buy performed inside the launch
-	// transaction (paid on top of the launch fee). 0 launches with no dev buy.
+	// DevBuyETH is an optional v1-only atomic initial buy performed inside the
+	// launch transaction (paid on top of the launch fee). v2 requires zero.
 	DevBuyETH float64 `yaml:"dev_buy_eth"`
 
 	// Accumulation.
@@ -84,6 +89,7 @@ type SocialsConfig struct {
 // DefaultConfig returns conservative operational defaults for a new strategy.
 func DefaultConfig() Config {
 	return Config{
+		Protocol:           ProtocolV2,
 		BuyFraction:        0.99,
 		AccumulateInterval: 3 * time.Second,
 		ChipTarget:         0.9,
@@ -118,6 +124,13 @@ func LoadConfig(path string) (*Config, error) {
 // Validate checks execution parameters. requireLaunchMetadata should be true
 // for a launch and false when binding an already launched token/pool.
 func (c *Config) Validate(requireLaunchMetadata bool) error {
+	protocol := c.Protocol
+	if protocol == "" {
+		protocol = ProtocolV1
+	}
+	if protocol != ProtocolV1 && protocol != ProtocolV2 {
+		return fmt.Errorf("protocol must be v1 or v2")
+	}
 	if c.RPCEndpoint == "" {
 		return fmt.Errorf("rpc_endpoint is required")
 	}
@@ -148,7 +161,18 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 	if c.GasReserveETH < 0 || c.PriorityTipGwei < 0 || c.DevBuyETH < 0 {
 		return fmt.Errorf("ETH and gas values must not be negative")
 	}
+	if requireLaunchMetadata && protocol == ProtocolV2 && c.DevBuyETH != 0 {
+		return fmt.Errorf("v2 launch does not support an atomic initial buy yet; set dev_buy_eth to 0")
+	}
 	return nil
+}
+
+// ProtocolName returns the normalized protocol value.
+func (c *Config) ProtocolName() string {
+	if c.Protocol == "" {
+		return ProtocolV1
+	}
+	return c.Protocol
 }
 
 // FeeWalletAddr returns the configured fee wallet, or nil when unset (defaults

@@ -209,12 +209,12 @@ func (s *Service) Preflight(id string) (string, error) {
 		if err := eng.Launch(ctx, true); err != nil {
 			return "", err
 		}
-		return "Launch preflight passed; no transaction was sent.", nil
+		return fmt.Sprintf("Pons %s launch preflight passed; no transaction was sent.", strategy.protocolName()), nil
 	}
 	if err := eng.Bind(ctx, common.HexToAddress(strategy.TokenAddress), common.HexToAddress(strategy.PoolAddress)); err != nil {
 		return "", err
 	}
-	return "Token, pool, RPC, and wallet binding checks passed.", nil
+	return fmt.Sprintf("Pons %s token, venue, RPC, and wallet binding checks passed.", strategy.protocolName()), nil
 }
 
 // Start begins a live strategy. The exact confirmation phrase prevents an
@@ -320,7 +320,7 @@ func (s *Service) runStrategy(ctx context.Context, strategy Strategy, settings S
 		return
 	}
 	token, poolAddr := eng.Binding()
-	s.updateJob(strategy.ID, "running", "Market maker is active", token.Hex(), poolAddr.Hex())
+	s.updateJob(strategy.ID, "running", fmt.Sprintf("Pons %s market maker is active", strategy.protocolName()), token.Hex(), poolAddr.Hex())
 	if err := eng.Run(ctx); err != nil {
 		s.finish(strategy.ID, "error", err.Error(), token.Hex(), poolAddr.Hex())
 		return

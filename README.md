@@ -1,6 +1,6 @@
 # PonsDesk
 
-PonsDesk is a native desktop control plane for launching and operating Pons v1 market-making strategies on Robinhood Chain (chain ID `4663`). The trading and monitoring engine is written in Go; the desktop shell uses Wails and React.
+PonsDesk is a native desktop control plane for launching and operating Pons v1 and v2 market-making strategies on Robinhood Chain (chain ID `4663`). The trading and monitoring engine is written in Go; the desktop shell uses Wails and React.
 
 > This application signs and broadcasts real transactions. Market making can lose all deployed capital through adverse price movement, gas, slippage, contract behavior, or software failure. Review every strategy and run a read-only preflight before enabling live execution.
 
@@ -10,7 +10,7 @@ PonsDesk is a native desktop control plane for launching and operating Pons v1 m
 
 - Run several token/pool strategies concurrently with independent RPC clients and logs.
 - Prevent active strategies from sharing a wallet, avoiding cross-strategy nonce collisions.
-- Launch a new Pons v1 token or bind an existing token and Uniswap V3 pool.
+- Launch a new Pons v2 bonding curve or a legacy Pons v1 token, and bind existing v2 curve or v1 Uniswap V3 venues.
 - Configure token metadata, accumulation, distribution, oscillation, slippage, gas reserve, and priority tip from the UI.
 - Import newline-separated private keys or derive EVM accounts from a BIP-39 mnemonic at `m/44'/60'/0'/0/i`.
 - Encrypt all imported keys locally with scrypt + AES-256-GCM. Mnemonics are never persisted.
@@ -21,7 +21,7 @@ PonsDesk is a native desktop control plane for launching and operating Pons v1 m
 
 Download the latest macOS universal application or Windows x64 installer from [GitHub Releases](https://github.com/bizipoopoo/pons-mm-desktop/releases).
 
-macOS release builds are ad-hoc signed. Until Apple notarization credentials are configured for the repository, macOS may require approving the downloaded application in System Settings.
+The release workflow signs macOS builds with a Developer ID Application certificate, notarizes them with Apple, and staples the ticket before packaging. Releases `v0.1.1` and earlier were ad-hoc signed and may require approval under **System Settings > Privacy & Security** before their first launch.
 
 ## First Run
 
@@ -31,7 +31,18 @@ macOS release builds are ad-hoc signed. Until Apple notarization credentials are
 4. Run **Preflight**. It performs RPC reads and launch/binding checks without sending a transaction.
 5. Start the strategy and type `LIVE` in the explicit confirmation dialog.
 
-After a successful launch, PonsDesk automatically persists the emitted token and pool addresses and switches that strategy to **Existing pair**. Restarting the strategy will not launch a second token.
+After a successful launch, PonsDesk automatically persists the emitted token and venue address (v2 curve or v1 pool) and switches that strategy to **Existing pair**. Restarting the strategy will not launch a second token.
+
+## Pons Protocol Versions
+
+New strategies default to the current Pons v2 stack. Existing configurations created before v2 desktop support remain on v1 until explicitly changed.
+
+| Protocol | Launch and trading path | Desktop behavior |
+| --- | --- | --- |
+| v2 | Bonding curve, then graduation to Uniswap V4 | Launches and market-makes the native-ETH curve; maker wallets are included as opening-tax exemptions. The engine stops safely at graduation and leaves any remaining positions for a future/manual V4 route. |
+| v1 | Direct launch into a locked Uniswap V3 pool | Preserves the existing V3 market-making flow. Launching may require a whitelisted deployer while the v1 public gate is closed. |
+
+The v2 direct-launch path does not offer an atomic creator initial buy. Set **Initial buy** to zero; maker accumulation begins after launch confirmation. Custom ERC-20 quote curves are not supported by the desktop engine yet.
 
 ## Multi-Pair Safety
 
@@ -84,6 +95,18 @@ Every version tag automatically builds macOS universal and Windows x64 desktop a
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+The macOS release job deliberately fails instead of publishing an ad-hoc-signed build when any Apple credential is missing. Configure these GitHub Actions repository secrets before creating a release tag:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_BASE64` | Base64-encoded Developer ID Application `.p12` export |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` file |
+| `APPLE_ID` | Apple ID used for notarization |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that Apple ID |
+| `APPLE_TEAM_ID` | 10-character Apple Developer team ID |
+
+Generate the certificate secret on macOS with `base64 -i DeveloperIDApplication.p12 | pbcopy`. Keep the certificate and all credentials out of the repository.
 
 Pushes and pull requests to `main` run Go tests, `go vet`, the frontend production build, and secret scanning.
 

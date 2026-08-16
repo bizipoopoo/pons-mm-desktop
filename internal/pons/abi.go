@@ -41,7 +41,41 @@ const (
 		{"indexed":false,"name":"pairToken","type":"address"},
 		{"indexed":false,"name":"launchConfigId","type":"uint256"},
 		{"indexed":false,"name":"graduationThreshold","type":"uint256"}],
-	"name":"TokenLaunched","type":"event"}
+	"name":"TokenLaunched","type":"event"},
+	{"inputs":[{"name":"launcher","type":"address"}],"name":"canLaunch","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"launchFee","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"id","type":"uint256"}],"name":"getLaunchConfig","outputs":[{"components":[
+		{"name":"supply","type":"uint256"},
+		{"name":"curveFeeBps","type":"uint256"},
+		{"name":"phantomQuote","type":"uint256"},
+		{"name":"graduationThreshold","type":"uint256"},
+		{"name":"poolFee","type":"uint24"},
+		{"name":"tickSpacing","type":"int24"},
+		{"name":"enabled","type":"bool"}],
+	"name":"","type":"tuple"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"launchConfigId","type":"uint256"},{"name":"pairToken","type":"address"}],"name":"previewLaunchEconomics","outputs":[{"name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"components":[
+		{"name":"name","type":"string"},
+		{"name":"symbol","type":"string"},
+		{"name":"logo","type":"string"},
+		{"name":"description","type":"string"},
+		{"components":[
+			{"name":"twitter","type":"string"},
+			{"name":"telegram","type":"string"},
+			{"name":"discord","type":"string"},
+			{"name":"website","type":"string"},
+			{"name":"farcaster","type":"string"}],
+		"name":"socials","type":"tuple"},
+		{"name":"creatorFeeRecipient","type":"address"},
+		{"name":"creatorTaxBps","type":"uint16"},
+		{"name":"buybackEnabled","type":"bool"},
+		{"name":"expectedEconomics","type":"bytes32"},
+		{"name":"salt","type":"bytes32"}],
+	"name":"params","type":"tuple"},
+		{"name":"launchConfigId","type":"uint256"},
+		{"name":"pairToken","type":"address"},
+		{"name":"snipeTaxExemptions","type":"address[]"}],
+	"name":"launchToken","outputs":[{"name":"token","type":"address"},{"name":"curve","type":"address"}],"stateMutability":"payable","type":"function"}
 ]`
 
 	curveABIJSON = `[
@@ -80,6 +114,7 @@ const (
 	{"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}

@@ -140,6 +140,7 @@ export namespace control {
 	    id: string;
 	    name: string;
 	    mode: string;
+	    protocol: string;
 	    enabled: boolean;
 	    tokenAddress: string;
 	    poolAddress: string;
@@ -171,6 +172,7 @@ export namespace control {
 	        this.id = source["id"];
 	        this.name = source["name"];
 	        this.mode = source["mode"];
+	        this.protocol = source["protocol"];
 	        this.enabled = source["enabled"];
 	        this.tokenAddress = source["tokenAddress"];
 	        this.poolAddress = source["poolAddress"];

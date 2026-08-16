@@ -40,6 +40,13 @@ func newConfigStore(path string) (*configStore, error) {
 	if s.data.Version != 1 {
 		return nil, errors.New("unsupported config version")
 	}
+	// Protocol was added after the first desktop release. Missing values are
+	// existing v1 strategies and must not silently switch launch stacks.
+	for i := range s.data.Strategies {
+		if s.data.Strategies[i].Protocol == "" {
+			s.data.Strategies[i].Protocol = "v1"
+		}
+	}
 	return s, nil
 }
 
@@ -86,6 +93,9 @@ func (s *configStore) saveStrategy(strategy Strategy) (Strategy, error) {
 	strategy.Name = strings.TrimSpace(strategy.Name)
 	strategy.TokenAddress = strings.TrimSpace(strategy.TokenAddress)
 	strategy.PoolAddress = strings.TrimSpace(strategy.PoolAddress)
+	if strategy.Protocol == "" {
+		strategy.Protocol = "v1"
+	}
 	strategy.UpdatedAt = now
 	if strategy.ID == "" {
 		strategy.ID = randomID()

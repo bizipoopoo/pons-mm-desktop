@@ -45,6 +45,7 @@ type Strategy struct {
 	ID                   string    `json:"id"`
 	Name                 string    `json:"name"`
 	Mode                 string    `json:"mode"`
+	Protocol             string    `json:"protocol"`
 	Enabled              bool      `json:"enabled"`
 	TokenAddress         string    `json:"tokenAddress"`
 	PoolAddress          string    `json:"poolAddress"`
@@ -72,6 +73,7 @@ func NewStrategy() Strategy {
 	now := time.Now().UTC().Format(time.RFC3339)
 	return Strategy{
 		Mode:                 ModeExisting,
+		Protocol:             ponsmm.ProtocolV2,
 		Enabled:              true,
 		BuyFraction:          0.99,
 		AccumulateIntervalMS: 3000,
@@ -91,6 +93,7 @@ func NewStrategy() Strategy {
 
 func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
 	return &ponsmm.Config{
+		Protocol:    s.protocolName(),
 		RPCEndpoint: settings.RPCEndpoint,
 		Token: ponsmm.TokenConfig{
 			Name: s.Token.Name, Symbol: s.Token.Symbol, Logo: s.Token.Logo,
@@ -128,6 +131,13 @@ func (s Strategy) validate(settings Settings) error {
 	if s.Mode != ModeLaunch && s.Mode != ModeExisting {
 		return errors.New("strategy mode must be launch or existing")
 	}
+	protocol := s.protocolName()
+	if protocol != ponsmm.ProtocolV1 && protocol != ponsmm.ProtocolV2 {
+		return errors.New("strategy protocol must be v1 or v2")
+	}
+	if s.Mode == ModeLaunch && protocol == ponsmm.ProtocolV2 && len(s.WalletIDs) > 33 {
+		return errors.New("pons v2 launch supports one deployer plus at most 32 maker wallets")
+	}
 	if s.Mode == ModeExisting && (!common.IsHexAddress(s.TokenAddress) || !common.IsHexAddress(s.PoolAddress)) {
 		return errors.New("existing strategy requires valid token and pool addresses")
 	}
@@ -143,6 +153,13 @@ func (s Strategy) validate(settings Settings) error {
 		seen[id] = true
 	}
 	return nil
+}
+
+func (s Strategy) protocolName() string {
+	if s.Protocol == "" {
+		return ponsmm.ProtocolV1
+	}
+	return s.Protocol
 }
 
 type JobStatus struct {

@@ -146,12 +146,19 @@ func decodeLaunch(lg types.Log) (Launch, bool) {
 	}, true
 }
 
-// WatchCurveTrades subscribes to a single curve's CurveBuy/CurveSell logs so the
-// exit monitor is event-driven (the equivalent of the Solana accountSubscribe
-// feed). Each notification just signals "reserves changed"; the caller re-reads
-// getReserves for authoritative pricing. Falls back to nil (poll-only) if the
-// endpoint cannot subscribe.
-func (c *Client) WatchCurveTrades(ctx context.Context, curve common.Address, log *slog.Logger) <-chan struct{} {
+// CurveTrade is one decoded v2 bonding-curve buy or sell.
+type CurveTrade struct {
+	IsBuy       bool
+	TokenAmount *big.Int
+	QuoteAmount *big.Int
+	Trader      common.Address
+	Recipient   common.Address
+	TxHash      common.Hash
+}
+
+// WatchCurveTradeEvents subscribes to decoded CurveBuy/CurveSell logs. It
+// returns nil for an HTTP endpoint, allowing callers to use polling instead.
+func (c *Client) WatchCurveTradeEvents(ctx context.Context, curve common.Address, log *slog.Logger) <-chan CurveTrade {
 	if !c.isWebsocket() {
 		return nil
 	}
@@ -165,7 +172,7 @@ func (c *Client) WatchCurveTrades(ctx context.Context, curve common.Address, log
 		log.Warn("pons: curve trade subscription failed; monitor will poll", "err", err)
 		return nil
 	}
-	out := make(chan struct{}, 64)
+	out := make(chan CurveTrade, 64)
 	go func() {
 		defer close(out)
 		defer sub.Unsubscribe()
@@ -175,7 +182,39 @@ func (c *Client) WatchCurveTrades(ctx context.Context, curve common.Address, log
 				return
 			case <-sub.Err():
 				return
-			case <-logs:
+			case lg := <-logs:
+				trade, ok := decodeCurveTrade(lg)
+				if !ok {
+					continue
+				}
+				select {
+				case out <- trade:
+				default:
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// WatchCurveTrades is the lightweight reserve-change signal used by the
+// existing sniper exit monitor.
+func (c *Client) WatchCurveTrades(ctx context.Context, curve common.Address, log *slog.Logger) <-chan struct{} {
+	events := c.WatchCurveTradeEvents(ctx, curve, log)
+	if events == nil {
+		return nil
+	}
+	out := make(chan struct{}, 64)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-events:
+				if !ok {
+					return
+				}
 				select {
 				case out <- struct{}{}:
 				default:
@@ -184,4 +223,42 @@ func (c *Client) WatchCurveTrades(ctx context.Context, curve common.Address, log
 		}
 	}()
 	return out
+}
+
+func decodeCurveTrade(lg types.Log) (CurveTrade, bool) {
+	if len(lg.Topics) < 3 {
+		return CurveTrade{}, false
+	}
+	trade := CurveTrade{
+		Trader:    common.BytesToAddress(lg.Topics[1].Bytes()),
+		Recipient: common.BytesToAddress(lg.Topics[2].Bytes()),
+		TxHash:    lg.TxHash,
+	}
+	switch lg.Topics[0] {
+	case curveBuyTopic:
+		var data struct {
+			QuoteIn   *big.Int
+			TokensOut *big.Int
+			Fee       *big.Int
+			Tax       *big.Int
+		}
+		if err := curveABI.UnpackIntoInterface(&data, "CurveBuy", lg.Data); err != nil {
+			return CurveTrade{}, false
+		}
+		trade.IsBuy, trade.TokenAmount, trade.QuoteAmount = true, data.TokensOut, data.QuoteIn
+	case curveSellTopic:
+		var data struct {
+			TokensIn *big.Int
+			QuoteOut *big.Int
+			Fee      *big.Int
+			Tax      *big.Int
+		}
+		if err := curveABI.UnpackIntoInterface(&data, "CurveSell", lg.Data); err != nil {
+			return CurveTrade{}, false
+		}
+		trade.TokenAmount, trade.QuoteAmount = data.TokensIn, data.QuoteOut
+	default:
+		return CurveTrade{}, false
+	}
+	return trade, trade.TokenAmount != nil && trade.QuoteAmount != nil
 }

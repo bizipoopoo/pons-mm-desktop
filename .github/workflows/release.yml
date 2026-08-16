@@ -29,8 +29,89 @@ jobs:
       - run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
       - name: Build universal macOS application
         run: wails build -clean -trimpath -platform darwin/universal -o PonsDesk
-      - name: Package application
+      - name: Validate Apple signing configuration
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_APP_SPECIFIC_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing required repository secret: ${name}"
+              exit 1
+            fi
+          done
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/ponsdesk-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$signing_identity" ]]; then
+            echo "::error::The imported certificate does not contain a Developer ID Application identity"
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+      - name: Sign application
+        run: |
+          codesign \
+            --force \
+            --deep \
+            --options runtime \
+            --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            build/bin/PonsDesk.app
+          codesign --verify --deep --strict --verbose=2 build/bin/PonsDesk.app
+      - name: Notarize application
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          notarization_zip="$RUNNER_TEMP/PonsDesk-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/bin/PonsDesk.app "$notarization_zip"
+          xcrun notarytool submit "$notarization_zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple -v build/bin/PonsDesk.app
+          xcrun stapler validate -v build/bin/PonsDesk.app
+          spctl --assess --type execute --verbose=4 build/bin/PonsDesk.app
+      - name: Package notarized application
         run: ditto -c -k --sequesterRsrc --keepParent build/bin/PonsDesk.app PonsDesk-macOS-universal.zip
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/ponsdesk-signing.keychain-db" 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         with:
           name: macos

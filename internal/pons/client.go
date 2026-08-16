@@ -175,6 +175,36 @@ func (c *Client) Graduated(ctx context.Context, curve common.Address) (bool, err
 	return g, nil
 }
 
+// CurveGraduationThreshold returns the real quote amount required before a v2
+// curve graduates to Uniswap.
+func (c *Client) CurveGraduationThreshold(ctx context.Context, curve common.Address) (*big.Int, error) {
+	var threshold *big.Int
+	if err := c.callView(ctx, curve, &curveABI, &threshold, "graduationThreshold"); err != nil {
+		return nil, err
+	}
+	return threshold, nil
+}
+
+// CurvePairToken returns the quote asset for a v2 curve. The zero address means
+// native ETH; other values require ERC-20 funding and approval.
+func (c *Client) CurvePairToken(ctx context.Context, curve common.Address) (common.Address, error) {
+	var pair common.Address
+	if err := c.callView(ctx, curve, &curveABI, &pair, "pairToken"); err != nil {
+		return common.Address{}, err
+	}
+	return pair, nil
+}
+
+// CurveSellableTokens returns the fixed portion of supply allocated to v2
+// curve trading. It excludes tokens reserved for graduation liquidity.
+func (c *Client) CurveSellableTokens(ctx context.Context, curve common.Address) (*big.Int, error) {
+	var tokens *big.Int
+	if err := c.callView(ctx, curve, &curveABI, &tokens, "sellableTokens"); err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
 // TokenBalance returns the ERC-20 balance of owner for the launch token.
 func (c *Client) TokenBalance(ctx context.Context, token, owner common.Address) (*big.Int, error) {
 	var bal *big.Int
@@ -182,6 +212,15 @@ func (c *Client) TokenBalance(ctx context.Context, token, owner common.Address) 
 		return nil, err
 	}
 	return bal, nil
+}
+
+// TokenSupply returns an ERC-20 token's total supply.
+func (c *Client) TokenSupply(ctx context.Context, token common.Address) (*big.Int, error) {
+	var supply *big.Int
+	if err := c.callView(ctx, token, &erc20ABI, &supply, "totalSupply"); err != nil {
+		return nil, err
+	}
+	return supply, nil
 }
 
 // Allowance returns owner's ERC-20 allowance granted to spender for token.

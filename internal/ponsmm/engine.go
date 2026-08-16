@@ -2,12 +2,14 @@ package ponsmm
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/bizipoopoo/pons-mm-desktop/internal/pons"
 )
@@ -19,6 +21,9 @@ const (
 	sellGasLimit     = 500_000
 	approveGasLimit  = 80_000
 	withdrawGasLimit = 80_000
+	// Recent v2 factory launches consume ~3.7M gas before exemption writes.
+	// The unused portion is refunded, so keep headroom for up to 32 makers.
+	launchV2GasLimit = 6_000_000
 )
 
 // restrictionGrace is how long after launch we conservatively cap a single
@@ -74,6 +79,7 @@ type Engine struct {
 	graduationThreshold *big.Int
 	maxWalletBps        uint16
 	tokenIsToken0       bool
+	v2Info              pons.LaunchInfo
 
 	launchAt time.Time
 	state    State
@@ -104,6 +110,13 @@ func (e *Engine) Binding() (common.Address, common.Address) {
 // Launch performs the token launch from the treasury wallet, waits for the
 // receipt, and binds the resulting token+pool. dryRun stops before sending.
 func (e *Engine) Launch(ctx context.Context, dryRun bool) error {
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		return e.launchV2(ctx, dryRun)
+	}
+	return e.launchV1(ctx, dryRun)
+}
+
+func (e *Engine) launchV1(ctx context.Context, dryRun bool) error {
 	who := e.pool.Treasury.Addr
 	can, err := e.client.CanLaunch(ctx, who)
 	if err != nil {
@@ -191,9 +204,105 @@ func (e *Engine) Launch(ctx context.Context, dryRun bool) error {
 	return e.Bind(ctx, launched.Token, launched.Pool)
 }
 
+func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
+	who := e.pool.Treasury.Addr
+	can, err := e.client.CanLaunchV2(ctx, who)
+	if err != nil {
+		return fmt.Errorf("v2 canLaunch preflight: %w", err)
+	}
+	if !can {
+		return fmt.Errorf("wallet %s may not launch through pons v2 right now", who.Hex())
+	}
+	fee, err := e.client.V2LaunchFee(ctx)
+	if err != nil {
+		return fmt.Errorf("read v2 launchFee: %w", err)
+	}
+	launchCfg, err := e.client.GetV2LaunchConfig(ctx, e.cfg.LaunchConfigID)
+	if err != nil {
+		return fmt.Errorf("read v2 launch config %d: %w", e.cfg.LaunchConfigID, err)
+	}
+	if !launchCfg.Enabled {
+		return fmt.Errorf("v2 launch config %d is disabled on-chain", e.cfg.LaunchConfigID)
+	}
+	pairToken := common.Address{} // Desktop v2 market making currently supports native ETH curves.
+	economics, err := e.client.PreviewV2LaunchEconomics(ctx, e.cfg.LaunchConfigID, pairToken)
+	if err != nil {
+		return fmt.Errorf("preview v2 launch economics: %w", err)
+	}
+	var salt [32]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return fmt.Errorf("generate v2 launch salt: %w", err)
+	}
+	creator := who
+	if fw := e.cfg.FeeWalletAddr(); fw != nil {
+		creator = *fw
+	}
+	params := pons.V2TokenParams{
+		Name: e.cfg.Token.Name, Symbol: e.cfg.Token.Symbol,
+		Logo: e.cfg.Token.Logo, Description: e.cfg.Token.Description,
+		Socials: pons.V2Socials{
+			Twitter: e.cfg.Token.Socials.Twitter, Telegram: e.cfg.Token.Socials.Telegram,
+			Discord: e.cfg.Token.Socials.Discord, Website: e.cfg.Token.Socials.Website,
+			Farcaster: e.cfg.Token.Socials.Farcaster,
+		},
+		CreatorFeeRecipient: creator,
+		BuybackEnabled:      true,
+		ExpectedEconomics:   economics,
+		Salt:                salt,
+	}
+	exemptions := make([]common.Address, 0, len(e.pool.Makers))
+	for _, wallet := range e.pool.Makers {
+		exemptions = append(exemptions, wallet.Addr)
+	}
+	if len(exemptions) > 32 {
+		return fmt.Errorf("v2 supports at most 32 additional snipe-tax-exempt maker wallets; got %d", len(exemptions))
+	}
+	e.log.Info("v2 launch preflight ok",
+		"deployer", who.Hex(), "launch_fee_eth", weiToEthStr(fee),
+		"supply", launchCfg.Supply.String(),
+		"graduation_threshold_eth", weiToEthStr(launchCfg.GraduationThreshold),
+		"maker_exemptions", len(exemptions))
+	if dryRun {
+		e.log.Info("dry-run: not sending v2 launch transaction")
+		return nil
+	}
+	if err := e.pool.RefreshETH(ctx); err != nil {
+		return err
+	}
+	pr, err := e.pool.txParams(ctx, e.pool.Treasury, launchV2GasLimit, e.extraTipWei)
+	if err != nil {
+		return err
+	}
+	tx, err := e.pool.Treasury.Signer.BuildV2Launch(params, e.cfg.LaunchConfigID, pairToken, exemptions, fee, pr)
+	if err != nil {
+		return fmt.Errorf("build v2 launch: %w", err)
+	}
+	if err := e.pool.send(ctx, e.pool.Treasury, tx); err != nil {
+		return fmt.Errorf("send v2 launch: %w", err)
+	}
+	e.log.Info("v2 launch submitted", "tx", tx.Hash().Hex())
+	rcpt, err := e.client.WaitReceipt(ctx, tx.Hash(), 120*time.Second)
+	if err != nil {
+		return fmt.Errorf("v2 launch confirm: %w", err)
+	}
+	launched, ok := pons.V2LaunchedFromReceipt(rcpt)
+	if !ok {
+		return fmt.Errorf("v2 launch receipt %s carried no TokenLaunched event", tx.Hash().Hex())
+	}
+	e.log.Info("v2 token launched", "token", launched.Token.Hex(), "curve", launched.Curve.Hex(), "block", launched.Block)
+	return e.Bind(ctx, launched.Token, launched.Curve)
+}
+
 // Bind attaches an already-launched token+pool (used by `mm` on an existing
 // token, or right after Launch).
 func (e *Engine) Bind(ctx context.Context, token, poolAddr common.Address) error {
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		return e.bindV2(ctx, token, poolAddr)
+	}
+	return e.bindV1(ctx, token, poolAddr)
+}
+
+func (e *Engine) bindV1(ctx context.Context, token, poolAddr common.Address) error {
 	st, err := e.client.GetV1Launch(ctx, token)
 	if err != nil {
 		return fmt.Errorf("read launch record: %w", err)
@@ -212,6 +321,39 @@ func (e *Engine) Bind(ctx context.Context, token, poolAddr common.Address) error
 	e.maxWalletBps = cfg.MaxWalletBps
 	e.tokenIsToken0 = st.IsToken0
 	e.monitor = NewMonitor(e.client, e.pool, token, poolAddr, st.IsToken0, st.Supply, e.log)
+	e.launchAt = time.Now()
+	e.state = Accumulating
+	return nil
+}
+
+func (e *Engine) bindV2(ctx context.Context, token, curve common.Address) error {
+	if token == (common.Address{}) || curve == (common.Address{}) {
+		return fmt.Errorf("token and curve addresses are required for pons v2")
+	}
+	pairToken, err := e.client.CurvePairToken(ctx, curve)
+	if err != nil {
+		return fmt.Errorf("read v2 pair token: %w", err)
+	}
+	info := pons.LaunchInfo{Token: token, Curve: curve, PairToken: pairToken}
+	if err := e.client.LoadLaunchInfo(ctx, &info); err != nil {
+		return fmt.Errorf("read v2 launch record: %w", err)
+	}
+	if !info.NativeQuote {
+		return fmt.Errorf("v2 custom-pair curves are not supported by the desktop market maker")
+	}
+	supply, err := e.client.TokenSupply(ctx, token)
+	if err != nil {
+		return fmt.Errorf("read v2 token supply: %w", err)
+	}
+	threshold, err := e.client.CurveGraduationThreshold(ctx, curve)
+	if err != nil {
+		return fmt.Errorf("read v2 graduation threshold: %w", err)
+	}
+	e.token, e.poolAddr = token, curve
+	e.supply, e.graduationThreshold = supply, threshold
+	e.maxWalletBps = 0
+	e.v2Info = info
+	e.monitor = NewCurveMonitor(e.client, e.pool, token, curve, supply, e.log)
 	e.launchAt = time.Now()
 	e.state = Accumulating
 	return nil
@@ -267,8 +409,20 @@ func (e *Engine) Run(ctx context.Context) error {
 				e.clearAllStep(ctx)
 			}
 		case <-reserveTick.C:
-			if err := e.monitor.RefreshReserves(ctx); err != nil {
-				e.log.Warn("reserve refresh failed", "err", err)
+			curveClosed := false
+			if e.cfg.ProtocolName() == ProtocolV2 {
+				graduated, err := e.client.Graduated(ctx, e.poolAddr)
+				if err == nil && graduated {
+					e.log.Warn("v2 curve graduated to Uniswap v4; stopping curve market maker",
+						"token", e.token.Hex(), "curve", e.poolAddr.Hex())
+					e.state = Done
+					curveClosed = true
+				}
+			}
+			if !curveClosed {
+				if err := e.monitor.RefreshReserves(ctx); err != nil {
+					e.log.Warn("reserve refresh failed", "err", err)
+				}
 			}
 		}
 		if e.state == Done {
@@ -332,6 +486,11 @@ func (e *Engine) onRetail(ctx context.Context, ev RetailEvent) {
 func (e *Engine) accumulateStep(ctx context.Context) {
 	snap := e.monitor.Snapshot()
 	graduated := e.pastGraduation(ctx)
+	if e.cfg.ProtocolName() == ProtocolV2 && graduated {
+		e.log.Warn("v2 curve graduated; accumulation stopped", "token", e.token.Hex())
+		e.state = Done
+		return
+	}
 	if snap.OurHoldFrac >= e.cfg.ChipTarget && (!e.cfg.Graduate || graduated) {
 		return
 	}
@@ -403,6 +562,10 @@ func (e *Engine) oscillateStep(ctx context.Context) {
 // pastGraduation reports whether the pool's paired principal has reached the
 // graduation threshold.
 func (e *Engine) pastGraduation(ctx context.Context) bool {
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		graduated, err := e.client.Graduated(ctx, e.poolAddr)
+		return err == nil && graduated
+	}
 	if e.graduationThreshold == nil || e.graduationThreshold.Sign() == 0 {
 		return false
 	}
@@ -433,6 +596,9 @@ func (e *Engine) nextFundedMaker() *Wallet {
 // clampBuyToWalletCap caps a buy so a wallet's resulting holding stays under
 // maxWalletBps of supply while the launch restriction window may still apply.
 func (e *Engine) clampBuyToWalletCap(ctx context.Context, w *Wallet, spend *big.Int) *big.Int {
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		return spend
+	}
 	if time.Since(e.launchAt) > restrictionGrace || e.maxWalletBps == 0 {
 		return spend
 	}
@@ -454,7 +620,14 @@ func (e *Engine) clampBuyToWalletCap(ctx context.Context, w *Wallet, spend *big.
 
 // buyOnce spends wethIn from wallet w on the launch token and records the fill.
 func (e *Engine) buyOnce(ctx context.Context, w *Wallet, wethIn *big.Int) error {
-	quote, err := e.client.QuoteV1Buy(ctx, e.token, wethIn)
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		if graduated, err := e.client.Graduated(ctx, e.poolAddr); err != nil {
+			return fmt.Errorf("check v2 curve state: %w", err)
+		} else if graduated {
+			return fmt.Errorf("v2 curve has graduated; curve buy is closed")
+		}
+	}
+	quote, err := e.quoteBuy(ctx, w, wethIn)
 	if err != nil {
 		return fmt.Errorf("quote buy: %w", err)
 	}
@@ -467,7 +640,12 @@ func (e *Engine) buyOnce(ctx context.Context, w *Wallet, wethIn *big.Int) error 
 	if err != nil {
 		return err
 	}
-	tx, err := w.Signer.BuildV1Buy(e.token, wethIn, minOut, pr)
+	var tx *types.Transaction
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		tx, err = w.Signer.BuildBuy(e.poolAddr, wethIn, minOut, true, pr)
+	} else {
+		tx, err = w.Signer.BuildV1Buy(e.token, wethIn, minOut, pr)
+	}
 	if err != nil {
 		return fmt.Errorf("build buy: %w", err)
 	}
@@ -487,7 +665,11 @@ func (e *Engine) buyOnce(ctx context.Context, w *Wallet, wethIn *big.Int) error 
 		got.SetInt64(0)
 	}
 	w.TokenRaw = after
-	if w.ETHWei != nil {
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		if balance, balanceErr := e.client.EthBalance(ctx, w.Addr); balanceErr == nil {
+			w.ETHWei = balance
+		}
+	} else if w.ETHWei != nil {
 		w.ETHWei = new(big.Int).Sub(w.ETHWei, wethIn)
 	}
 	e.monitor.RecordOurBuy(wethIn, got)
@@ -519,10 +701,17 @@ func (e *Engine) sellTranche(ctx context.Context, frac float64) {
 // sellOnce sells `tokens` from wallet w, ensuring a router approval first, and
 // unwraps the WETH proceeds back to ETH.
 func (e *Engine) sellOnce(ctx context.Context, w *Wallet, tokens *big.Int) error {
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		if graduated, err := e.client.Graduated(ctx, e.poolAddr); err != nil {
+			return fmt.Errorf("check v2 curve state: %w", err)
+		} else if graduated {
+			return fmt.Errorf("v2 curve has graduated; curve sell is closed and the position must be handled on Uniswap v4")
+		}
+	}
 	if err := e.ensureApprove(ctx, w, tokens); err != nil {
 		return err
 	}
-	quote, err := e.client.QuoteV1Sell(ctx, e.token, tokens)
+	quote, err := e.quoteSell(ctx, tokens)
 	if err != nil {
 		return fmt.Errorf("quote sell: %w", err)
 	}
@@ -531,7 +720,12 @@ func (e *Engine) sellOnce(ctx context.Context, w *Wallet, tokens *big.Int) error
 	if err != nil {
 		return err
 	}
-	tx, err := w.Signer.BuildV1Sell(e.token, tokens, minOut, pr)
+	var tx *types.Transaction
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		tx, err = w.Signer.BuildSell(e.poolAddr, tokens, minOut, pr)
+	} else {
+		tx, err = w.Signer.BuildV1Sell(e.token, tokens, minOut, pr)
+	}
 	if err != nil {
 		return fmt.Errorf("build sell: %w", err)
 	}
@@ -551,7 +745,11 @@ func (e *Engine) sellOnce(ctx context.Context, w *Wallet, tokens *big.Int) error
 	e.monitor.RecordOurSell(tokens, quote)
 	e.log.Info("sold", "wallet", w.Addr.Hex(),
 		"tokens", tokens.String(), "weth_out_eth", weiToEthStr(quote), "tx", tx.Hash().Hex())
-	e.unwrapWeth(ctx, w)
+	if e.cfg.ProtocolName() == ProtocolV1 {
+		e.unwrapWeth(ctx, w)
+	} else if balance, balanceErr := e.client.EthBalance(ctx, w.Addr); balanceErr == nil {
+		w.ETHWei = balance
+	}
 	return nil
 }
 
@@ -559,6 +757,9 @@ func (e *Engine) sellOnce(ctx context.Context, w *Wallet, tokens *big.Int) error
 // below `need`.
 func (e *Engine) ensureApprove(ctx context.Context, w *Wallet, need *big.Int) error {
 	spender := common.HexToAddress(pons.V1SwapRouter)
+	if e.cfg.ProtocolName() == ProtocolV2 {
+		spender = e.poolAddr
+	}
 	cur, err := e.client.Allowance(ctx, e.token, w.Addr, spender)
 	if err != nil {
 		return fmt.Errorf("read allowance: %w", err)
@@ -628,9 +829,37 @@ func (e *Engine) quoteSellAll(ctx context.Context, tokens *big.Int) *big.Int {
 	if tokens == nil || tokens.Sign() == 0 {
 		return big.NewInt(0)
 	}
-	out, err := e.client.QuoteV1Sell(ctx, e.token, tokens)
+	out, err := e.quoteSell(ctx, tokens)
 	if err != nil {
 		return big.NewInt(0)
 	}
 	return out
+}
+
+func (e *Engine) quoteBuy(ctx context.Context, wallet *Wallet, quoteIn *big.Int) (*big.Int, error) {
+	if e.cfg.ProtocolName() == ProtocolV1 {
+		return e.client.QuoteV1Buy(ctx, e.token, quoteIn)
+	}
+	quoteReserve, tokenReserve, err := e.client.Reserves(ctx, e.poolAddr)
+	if err != nil {
+		return nil, err
+	}
+	snipeTax, err := e.client.SnipeTaxBps(ctx, e.poolAddr, wallet.Addr)
+	if err != nil {
+		return nil, err
+	}
+	return pons.TokensOutForQuote(quoteReserve, tokenReserve, quoteIn,
+		e.v2Info.FeeBps, e.v2Info.CreatorTaxBps+snipeTax), nil
+}
+
+func (e *Engine) quoteSell(ctx context.Context, tokens *big.Int) (*big.Int, error) {
+	if e.cfg.ProtocolName() == ProtocolV1 {
+		return e.client.QuoteV1Sell(ctx, e.token, tokens)
+	}
+	quoteReserve, tokenReserve, err := e.client.Reserves(ctx, e.poolAddr)
+	if err != nil {
+		return nil, err
+	}
+	return pons.QuoteOutForTokens(quoteReserve, tokenReserve, tokens,
+		e.v2Info.FeeBps, e.v2Info.CreatorTaxBps), nil
 }

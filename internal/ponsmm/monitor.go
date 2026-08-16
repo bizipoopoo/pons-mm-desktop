@@ -34,6 +34,7 @@ type Monitor struct {
 	token         common.Address
 	poolAddr      common.Address
 	tokenIsToken0 bool
+	curveMode     bool
 	supply        *big.Int
 	log           *slog.Logger
 
@@ -53,6 +54,15 @@ type Monitor struct {
 	lastTradeAt        time.Time
 	poolTokenReserve   *big.Int // tokens still sitting in the pool (not yet bought)
 	ownTx              map[common.Hash]bool
+}
+
+// NewCurveMonitor builds a monitor for a pons v2 bonding curve. It shares the
+// strategy accounting with the v1 pool monitor while sourcing reserves and
+// trade events from the curve contract.
+func NewCurveMonitor(client *pons.Client, pool *Pool, token, curve common.Address, supply *big.Int, log *slog.Logger) *Monitor {
+	m := NewMonitor(client, pool, token, curve, false, supply, log)
+	m.curveMode = true
+	return m
 }
 
 // NewMonitor builds a monitor for a launched token/pool.
@@ -156,6 +166,16 @@ func (m *Monitor) Snapshot() Snapshot {
 // RefreshReserves reads how many launch tokens still sit in the pool, so the
 // engine can compute circulating supply and our holding fraction.
 func (m *Monitor) RefreshReserves(ctx context.Context) error {
+	if m.curveMode {
+		_, tokenReserve, err := m.client.Reserves(ctx, m.poolAddr)
+		if err != nil {
+			return err
+		}
+		m.mu.Lock()
+		m.poolTokenReserve = tokenReserve
+		m.mu.Unlock()
+		return nil
+	}
 	bal, err := m.client.TokenBalance(ctx, m.token, m.poolAddr)
 	if err != nil {
 		return err
@@ -169,6 +189,10 @@ func (m *Monitor) RefreshReserves(ctx context.Context) error {
 // Run consumes pool trades until ctx ends. Retail trades are pushed onto
 // m.Retail (best effort; dropped if the engine is slow).
 func (m *Monitor) Run(ctx context.Context) {
+	if m.curveMode {
+		m.runCurve(ctx)
+		return
+	}
 	trades := m.client.WatchPoolTrades(ctx, m.poolAddr, m.tokenIsToken0, m.log)
 	if trades == nil {
 		m.log.Warn("pons mm: pool trade subscription unavailable; monitor is price-only via periodic reserve refresh")
@@ -184,6 +208,33 @@ func (m *Monitor) Run(ctx context.Context) {
 				return
 			}
 			m.onTrade(t)
+		}
+	}
+}
+
+func (m *Monitor) runCurve(ctx context.Context) {
+	trades := m.client.WatchCurveTradeEvents(ctx, m.poolAddr, m.log)
+	if trades == nil {
+		m.log.Warn("pons v2: curve trade subscription unavailable; monitor is price-only via polling")
+		<-ctx.Done()
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case trade, ok := <-trades:
+			if !ok {
+				return
+			}
+			m.onTrade(pons.PoolTrade{
+				IsBuy:       trade.IsBuy,
+				TokenAmount: trade.TokenAmount,
+				WethAmount:  trade.QuoteAmount,
+				Sender:      trade.Trader,
+				Recipient:   trade.Recipient,
+				TxHash:      trade.TxHash,
+			})
 		}
 	}
 }

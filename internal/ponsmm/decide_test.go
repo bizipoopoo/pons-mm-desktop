@@ -92,3 +92,20 @@ func TestEthToWei(t *testing.T) {
 		t.Fatal("ethToWei(0) must be zero")
 	}
 }
+
+func TestConfigProtocolCompatibility(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ProtocolName() != ProtocolV2 {
+		t.Fatalf("new config protocol = %q, want v2", cfg.ProtocolName())
+	}
+	legacy := Config{}
+	if legacy.ProtocolName() != ProtocolV1 {
+		t.Fatalf("legacy config protocol = %q, want v1", legacy.ProtocolName())
+	}
+	cfg.DevBuyETH = 0.1
+	cfg.RPCEndpoint = "https://rpc.example"
+	cfg.Token.Name, cfg.Token.Symbol = "Test", "TEST"
+	if err := cfg.Validate(true); err == nil {
+		t.Fatal("v2 launch with atomic dev buy must be rejected")
+	}
+}
