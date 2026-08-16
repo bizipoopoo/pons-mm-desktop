@@ -1,0 +1,636 @@
+package ponsmm
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/bizipoopoo/pons-mm-desktop/internal/pons"
+)
+
+// Gas limits for the router/token operations. The v1 snipe path uses the same
+// 500k for swaps; approvals/withdraws are cheap.
+const (
+	buyGasLimit      = 500_000
+	sellGasLimit     = 500_000
+	approveGasLimit  = 80_000
+	withdrawGasLimit = 80_000
+)
+
+// restrictionGrace is how long after launch we conservatively cap a single
+// wallet's holding to maxWalletBps of supply. The factory only enforces the cap
+// for the first ~2 parent-chain blocks; this wall-clock guard is a simple,
+// safe over-approximation of that window.
+const restrictionGrace = 12 * time.Second
+
+// State is the market-making state machine's current mode.
+type State int
+
+const (
+	Launching State = iota
+	Accumulating
+	Distributing
+	Oscillating
+	ClearAll
+	Done
+)
+
+func (s State) String() string {
+	switch s {
+	case Launching:
+		return "launching"
+	case Accumulating:
+		return "accumulating"
+	case Distributing:
+		return "distributing"
+	case Oscillating:
+		return "oscillating"
+	case ClearAll:
+		return "clear-all"
+	case Done:
+		return "done"
+	default:
+		return "unknown"
+	}
+}
+
+// Engine launches a token and market-makes it per the config.
+type Engine struct {
+	cfg     *Config
+	client  *pons.Client
+	pool    *Pool
+	monitor *Monitor
+	log     *slog.Logger
+
+	token    common.Address
+	poolAddr common.Address
+
+	// From the active launch config / launch record.
+	supply              *big.Int
+	graduationThreshold *big.Int
+	maxWalletBps        uint16
+	tokenIsToken0       bool
+
+	launchAt time.Time
+	state    State
+	rr       int // round-robin cursor over maker wallets
+
+	extraTipWei *big.Int
+}
+
+// NewEngine wires an engine. token/poolAddr may be zero if a launch will run
+// first; call Bind after launch to attach them.
+func NewEngine(cfg *Config, client *pons.Client, pool *Pool, log *slog.Logger) *Engine {
+	return &Engine{
+		cfg:         cfg,
+		client:      client,
+		pool:        pool,
+		log:         log,
+		state:       Launching,
+		extraTipWei: gweiToWei(cfg.PriorityTipGwei),
+	}
+}
+
+// Binding returns the token and pool currently attached to the engine. It is
+// used to persist launch results so a desktop strategy can resume after restart.
+func (e *Engine) Binding() (common.Address, common.Address) {
+	return e.token, e.poolAddr
+}
+
+// Launch performs the token launch from the treasury wallet, waits for the
+// receipt, and binds the resulting token+pool. dryRun stops before sending.
+func (e *Engine) Launch(ctx context.Context, dryRun bool) error {
+	who := e.pool.Treasury.Addr
+	can, err := e.client.CanLaunch(ctx, who)
+	if err != nil {
+		return fmt.Errorf("canLaunch preflight: %w", err)
+	}
+	if !can {
+		return fmt.Errorf("wallet %s may not launch: launches are disabled and it is not whitelisted", who.Hex())
+	}
+	fee, err := e.client.LaunchFee(ctx)
+	if err != nil {
+		return fmt.Errorf("read launchFee: %w", err)
+	}
+	cfg, err := e.client.GetLaunchConfig(ctx, e.cfg.LaunchConfigID)
+	if err != nil {
+		return fmt.Errorf("read launch config %d: %w", e.cfg.LaunchConfigID, err)
+	}
+	if !cfg.Enabled {
+		return fmt.Errorf("launch config %d is disabled on-chain", e.cfg.LaunchConfigID)
+	}
+
+	devBuy := ethToWei(e.cfg.DevBuyETH)
+	value := new(big.Int).Add(fee, devBuy)
+
+	feeWallet := common.Address{}
+	if fw := e.cfg.FeeWalletAddr(); fw != nil {
+		feeWallet = *fw
+	}
+	params := pons.V1TokenParams{
+		Name:        e.cfg.Token.Name,
+		Symbol:      e.cfg.Token.Symbol,
+		Logo:        e.cfg.Token.Logo,
+		Description: e.cfg.Token.Description,
+		Socials: pons.V1Socials{
+			Twitter:   e.cfg.Token.Socials.Twitter,
+			Telegram:  e.cfg.Token.Socials.Telegram,
+			Discord:   e.cfg.Token.Socials.Discord,
+			Website:   e.cfg.Token.Socials.Website,
+			Farcaster: e.cfg.Token.Socials.Farcaster,
+		},
+		FeeWallet: feeWallet,
+	}
+
+	e.log.Info("launch preflight ok",
+		"deployer", who.Hex(),
+		"launch_fee_eth", weiToEthStr(fee),
+		"dev_buy_eth", e.cfg.DevBuyETH,
+		"value_eth", weiToEthStr(value),
+		"supply", cfg.Supply.String(),
+		"graduation_threshold_eth", weiToEthStr(cfg.GraduationThreshold),
+		"max_wallet_bps", cfg.MaxWalletBps)
+
+	if dryRun {
+		e.log.Info("dry-run: not sending launch transaction")
+		return nil
+	}
+
+	if err := e.pool.RefreshETH(ctx); err != nil {
+		return err
+	}
+	pr, err := e.pool.txParams(ctx, e.pool.Treasury, buyGasLimit, e.extraTipWei)
+	if err != nil {
+		return err
+	}
+	var salt [32]byte // zero salt: deterministic per (deployer, params, config)
+	tx, err := e.pool.Treasury.Signer.BuildV1Launch(params, e.cfg.LaunchConfigID, e.cfg.DexID, salt, value, pr)
+	if err != nil {
+		return fmt.Errorf("build launch: %w", err)
+	}
+	if err := e.pool.send(ctx, e.pool.Treasury, tx); err != nil {
+		return fmt.Errorf("send launch: %w", err)
+	}
+	e.log.Info("launch submitted", "tx", tx.Hash().Hex())
+	rcpt, err := e.client.WaitReceipt(ctx, tx.Hash(), 120*time.Second)
+	if err != nil {
+		return fmt.Errorf("launch confirm: %w", err)
+	}
+	launched, ok := pons.LaunchedFromReceipt(rcpt)
+	if !ok {
+		return fmt.Errorf("launch receipt %s carried no TokenLaunched event", tx.Hash().Hex())
+	}
+	e.log.Info("token launched",
+		"token", launched.Token.Hex(),
+		"pool", launched.Pool.Hex(),
+		"block", launched.Block)
+	return e.Bind(ctx, launched.Token, launched.Pool)
+}
+
+// Bind attaches an already-launched token+pool (used by `mm` on an existing
+// token, or right after Launch).
+func (e *Engine) Bind(ctx context.Context, token, poolAddr common.Address) error {
+	st, err := e.client.GetV1Launch(ctx, token)
+	if err != nil {
+		return fmt.Errorf("read launch record: %w", err)
+	}
+	if poolAddr == (common.Address{}) {
+		return fmt.Errorf("pool address is required to bind token %s", token.Hex())
+	}
+	cfg, err := e.client.GetLaunchConfig(ctx, st.LaunchConfigId.Uint64())
+	if err != nil {
+		return fmt.Errorf("read launch config: %w", err)
+	}
+	e.token = token
+	e.poolAddr = poolAddr
+	e.supply = st.Supply
+	e.graduationThreshold = cfg.GraduationThreshold
+	e.maxWalletBps = cfg.MaxWalletBps
+	e.tokenIsToken0 = st.IsToken0
+	e.monitor = NewMonitor(e.client, e.pool, token, poolAddr, st.IsToken0, st.Supply, e.log)
+	e.launchAt = time.Now()
+	e.state = Accumulating
+	return nil
+}
+
+// Run drives the market-making state machine until ctx ends. On shutdown it
+// leaves positions as-is (use `collect` to liquidate and sweep).
+func (e *Engine) Run(ctx context.Context) error {
+	if e.monitor == nil {
+		return fmt.Errorf("engine not bound to a token; call Launch or Bind first")
+	}
+	if err := e.pool.RefreshETH(ctx); err != nil {
+		return err
+	}
+	if err := e.pool.RefreshToken(ctx, e.token); err != nil {
+		return err
+	}
+	if err := e.monitor.RefreshReserves(ctx); err != nil {
+		e.log.Warn("initial reserve refresh failed", "err", err)
+	}
+	e.seedMonitorFromBalances()
+
+	go e.monitor.Run(ctx)
+
+	accTick := time.NewTicker(e.cfg.AccumulateInterval)
+	defer accTick.Stop()
+	sellTick := time.NewTicker(e.cfg.SellInterval)
+	defer sellTick.Stop()
+	reserveTick := time.NewTicker(10 * time.Second)
+	defer reserveTick.Stop()
+
+	e.log.Info("market maker running",
+		"token", e.token.Hex(), "pool", e.poolAddr.Hex(), "state", e.state.String())
+
+	for {
+		select {
+		case <-ctx.Done():
+			e.log.Info("shutting down", "state", e.state.String())
+			return nil
+		case ev := <-e.monitor.Retail:
+			e.onRetail(ctx, ev)
+		case <-accTick.C:
+			if e.state == Accumulating {
+				e.accumulateStep(ctx)
+			}
+		case <-sellTick.C:
+			switch e.state {
+			case Distributing:
+				e.distributeStep(ctx)
+			case Oscillating:
+				e.oscillateStep(ctx)
+			case ClearAll:
+				e.clearAllStep(ctx)
+			}
+		case <-reserveTick.C:
+			if err := e.monitor.RefreshReserves(ctx); err != nil {
+				e.log.Warn("reserve refresh failed", "err", err)
+			}
+		}
+		if e.state == Done {
+			e.log.Info("state machine reached Done; exiting")
+			return nil
+		}
+	}
+}
+
+// seedMonitorFromBalances records our starting token position (e.g. the dev buy
+// or an earlier accumulation run) so cost/holding math is anchored. Cost is
+// unknown for pre-existing holdings, so it is recorded at the current pool price.
+func (e *Engine) seedMonitorFromBalances() {
+	held := e.pool.TotalTokens()
+	if held.Sign() == 0 {
+		return
+	}
+	e.monitor.mu.Lock()
+	e.monitor.ourTokens = new(big.Int).Set(held)
+	e.monitor.mu.Unlock()
+}
+
+// onRetail reacts to an outside trade.
+func (e *Engine) onRetail(ctx context.Context, ev RetailEvent) {
+	snap := e.monitor.Snapshot()
+	if ev.IsBuy {
+		e.log.Info("retail buy detected",
+			"tokens", ev.TokenAmount.String(), "weth", weiToEthStr(ev.WethAmount),
+			"our_hold_frac", snap.OurHoldFrac, "state", e.state.String())
+		if snap.OurHoldFrac >= e.cfg.HighHold {
+			if e.state != Oscillating {
+				e.log.Info("high holding + retail buy -> oscillating around retail cost")
+				e.state = Oscillating
+			}
+			return
+		}
+		// Low holding: decide clear-all vs slow distribute by whether an
+		// immediate full exit at least breaks even.
+		proceeds := e.quoteSellAll(ctx, snap.OurTokens)
+		next := retailBuyResponse(snap.OurHoldFrac, e.cfg.HighHold, proceeds, snap.OurWethSpent)
+		e.log.Info("low holding + retail buy",
+			"sell_all_proceeds_eth", weiToEthStr(proceeds), "our_cost_eth", weiToEthStr(snap.OurWethSpent),
+			"decision", next.String())
+		e.state = next
+		if e.state == ClearAll {
+			e.clearAllStep(ctx)
+		}
+		return
+	}
+	// Retail sell: if we were distributing into their buy, they are leaving;
+	// revert to accumulation per the spec.
+	if e.state == Distributing {
+		e.log.Info("retail sell during distribution -> back to accumulating")
+		e.state = Accumulating
+	}
+}
+
+// accumulateStep buys from the next maker wallet with spendable ETH, unless we
+// have already met the chip target and (if graduating) the pool is past the
+// threshold.
+func (e *Engine) accumulateStep(ctx context.Context) {
+	snap := e.monitor.Snapshot()
+	graduated := e.pastGraduation(ctx)
+	if snap.OurHoldFrac >= e.cfg.ChipTarget && (!e.cfg.Graduate || graduated) {
+		return
+	}
+	w := e.nextFundedMaker()
+	if w == nil {
+		e.log.Warn("accumulation stalled: no maker wallet has spendable ETH")
+		return
+	}
+	gasReserve := ethToWei(e.cfg.GasReserveETH)
+	spend := scaleWei(w.spendableWei(gasReserve), e.cfg.BuyFraction)
+	if spend.Sign() <= 0 {
+		return
+	}
+	spend = e.clampBuyToWalletCap(ctx, w, spend)
+	if spend.Sign() <= 0 {
+		return
+	}
+	if err := e.buyOnce(ctx, w, spend); err != nil {
+		e.log.Warn("accumulation buy failed", "wallet", w.Addr.Hex(), "err", err)
+	}
+}
+
+// distributeStep sells one slow tranche of our remaining holding. When we reach
+// zero the token is done.
+func (e *Engine) distributeStep(ctx context.Context) {
+	snap := e.monitor.Snapshot()
+	if snap.OurTokens.Sign() <= 0 {
+		e.log.Info("distribution complete; holding is zero -> done")
+		e.state = Done
+		return
+	}
+	e.sellTranche(ctx, e.cfg.SellTranche)
+}
+
+// clearAllStep liquidates the entire position across all wallets in one pass.
+func (e *Engine) clearAllStep(ctx context.Context) {
+	e.log.Info("clearing entire position")
+	e.sellTranche(ctx, 1.0)
+	e.state = Done
+}
+
+// oscillateStep keeps the price under the retail cost anchor, wiggling within
+// the configured band: sell when price rises to the anchor, buy when it dips
+// below the lower band.
+func (e *Engine) oscillateStep(ctx context.Context) {
+	snap := e.monitor.Snapshot()
+	if snap.RetailLastBuyPx == nil || snap.PriceWeiPerToken == nil {
+		return
+	}
+	action := oscillationAction(snap.PriceWeiPerToken, snap.RetailLastBuyPx, e.cfg.OscillationBand)
+	switch action {
+	case actionSell:
+		e.sellTranche(ctx, e.cfg.SellTranche)
+	case actionBuy:
+		w := e.nextFundedMaker()
+		if w == nil {
+			return
+		}
+		gasReserve := ethToWei(e.cfg.GasReserveETH)
+		spend := scaleWei(w.spendableWei(gasReserve), e.cfg.BuyFraction*0.25)
+		if spend.Sign() > 0 {
+			if err := e.buyOnce(ctx, w, spend); err != nil {
+				e.log.Warn("oscillation buy failed", "err", err)
+			}
+		}
+	}
+}
+
+// pastGraduation reports whether the pool's paired principal has reached the
+// graduation threshold.
+func (e *Engine) pastGraduation(ctx context.Context) bool {
+	if e.graduationThreshold == nil || e.graduationThreshold.Sign() == 0 {
+		return false
+	}
+	principal, _, graduated, err := e.client.GraduationStatus(ctx, e.token)
+	if err != nil {
+		return false
+	}
+	if graduated {
+		return true
+	}
+	return principal.Cmp(e.graduationThreshold) >= 0
+}
+
+// nextFundedMaker round-robins to the next maker wallet with spendable ETH.
+func (e *Engine) nextFundedMaker() *Wallet {
+	gasReserve := ethToWei(e.cfg.GasReserveETH)
+	n := len(e.pool.Makers)
+	for i := 0; i < n; i++ {
+		w := e.pool.Makers[(e.rr+i)%n]
+		if w.spendableWei(gasReserve).Sign() > 0 {
+			e.rr = (e.rr + i + 1) % n
+			return w
+		}
+	}
+	return nil
+}
+
+// clampBuyToWalletCap caps a buy so a wallet's resulting holding stays under
+// maxWalletBps of supply while the launch restriction window may still apply.
+func (e *Engine) clampBuyToWalletCap(ctx context.Context, w *Wallet, spend *big.Int) *big.Int {
+	if time.Since(e.launchAt) > restrictionGrace || e.maxWalletBps == 0 {
+		return spend
+	}
+	capTokens := new(big.Int).Div(new(big.Int).Mul(e.supply, big.NewInt(int64(e.maxWalletBps))), big.NewInt(10_000))
+	room := new(big.Int).Sub(capTokens, w.TokenRaw)
+	if room.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	// Estimate the ETH needed to buy `room` tokens; if our intended spend buys
+	// fewer than room, no clamp needed.
+	wantTokens, err := e.client.QuoteV1Buy(ctx, e.token, spend)
+	if err != nil || wantTokens.Cmp(room) <= 0 {
+		return spend
+	}
+	// Scale spend down by room/wantTokens.
+	scaled := new(big.Int).Div(new(big.Int).Mul(spend, room), wantTokens)
+	return scaled
+}
+
+// buyOnce spends wethIn from wallet w on the launch token and records the fill.
+func (e *Engine) buyOnce(ctx context.Context, w *Wallet, wethIn *big.Int) error {
+	quote, err := e.client.QuoteV1Buy(ctx, e.token, wethIn)
+	if err != nil {
+		return fmt.Errorf("quote buy: %w", err)
+	}
+	minOut := applySlippage(quote, e.cfg.SlippageBps)
+	before, err := e.client.TokenBalance(ctx, e.token, w.Addr)
+	if err != nil {
+		return fmt.Errorf("balance before: %w", err)
+	}
+	pr, err := e.pool.txParams(ctx, w, buyGasLimit, e.extraTipWei)
+	if err != nil {
+		return err
+	}
+	tx, err := w.Signer.BuildV1Buy(e.token, wethIn, minOut, pr)
+	if err != nil {
+		return fmt.Errorf("build buy: %w", err)
+	}
+	e.monitor.MarkOurTx(tx.Hash())
+	if err := e.pool.send(ctx, w, tx); err != nil {
+		return fmt.Errorf("send buy: %w", err)
+	}
+	if _, err := e.client.WaitReceipt(ctx, tx.Hash(), 90*time.Second); err != nil {
+		return fmt.Errorf("buy confirm: %w", err)
+	}
+	after, err := e.client.TokenBalance(ctx, e.token, w.Addr)
+	if err != nil {
+		return fmt.Errorf("balance after: %w", err)
+	}
+	got := new(big.Int).Sub(after, before)
+	if got.Sign() < 0 {
+		got.SetInt64(0)
+	}
+	w.TokenRaw = after
+	if w.ETHWei != nil {
+		w.ETHWei = new(big.Int).Sub(w.ETHWei, wethIn)
+	}
+	e.monitor.RecordOurBuy(wethIn, got)
+	e.log.Info("bought", "wallet", w.Addr.Hex(),
+		"weth_in_eth", weiToEthStr(wethIn), "tokens", got.String(), "tx", tx.Hash().Hex())
+	return nil
+}
+
+// sellTranche sells `frac` of each wallet's holding back to WETH and records the
+// fills. frac=1 clears everything.
+func (e *Engine) sellTranche(ctx context.Context, frac float64) {
+	for _, w := range e.pool.All() {
+		if w.TokenRaw == nil || w.TokenRaw.Sign() == 0 {
+			continue
+		}
+		amount := w.TokenRaw
+		if frac < 1.0 {
+			amount = scaleWei(w.TokenRaw, frac)
+		}
+		if amount.Sign() <= 0 {
+			continue
+		}
+		if err := e.sellOnce(ctx, w, amount); err != nil {
+			e.log.Warn("sell failed", "wallet", w.Addr.Hex(), "err", err)
+		}
+	}
+}
+
+// sellOnce sells `tokens` from wallet w, ensuring a router approval first, and
+// unwraps the WETH proceeds back to ETH.
+func (e *Engine) sellOnce(ctx context.Context, w *Wallet, tokens *big.Int) error {
+	if err := e.ensureApprove(ctx, w, tokens); err != nil {
+		return err
+	}
+	quote, err := e.client.QuoteV1Sell(ctx, e.token, tokens)
+	if err != nil {
+		return fmt.Errorf("quote sell: %w", err)
+	}
+	minOut := applySlippage(quote, e.cfg.SlippageBps)
+	pr, err := e.pool.txParams(ctx, w, sellGasLimit, e.extraTipWei)
+	if err != nil {
+		return err
+	}
+	tx, err := w.Signer.BuildV1Sell(e.token, tokens, minOut, pr)
+	if err != nil {
+		return fmt.Errorf("build sell: %w", err)
+	}
+	e.monitor.MarkOurTx(tx.Hash())
+	if err := e.pool.send(ctx, w, tx); err != nil {
+		return fmt.Errorf("send sell: %w", err)
+	}
+	if _, err := e.client.WaitReceipt(ctx, tx.Hash(), 90*time.Second); err != nil {
+		return fmt.Errorf("sell confirm: %w", err)
+	}
+	after, err := e.client.TokenBalance(ctx, e.token, w.Addr)
+	if err == nil {
+		w.TokenRaw = after
+	} else {
+		w.TokenRaw = new(big.Int).Sub(w.TokenRaw, tokens)
+	}
+	e.monitor.RecordOurSell(tokens, quote)
+	e.log.Info("sold", "wallet", w.Addr.Hex(),
+		"tokens", tokens.String(), "weth_out_eth", weiToEthStr(quote), "tx", tx.Hash().Hex())
+	e.unwrapWeth(ctx, w)
+	return nil
+}
+
+// ensureApprove grants the router an infinite allowance if the current one is
+// below `need`.
+func (e *Engine) ensureApprove(ctx context.Context, w *Wallet, need *big.Int) error {
+	spender := common.HexToAddress(pons.V1SwapRouter)
+	cur, err := e.client.Allowance(ctx, e.token, w.Addr, spender)
+	if err != nil {
+		return fmt.Errorf("read allowance: %w", err)
+	}
+	if cur.Cmp(need) >= 0 {
+		return nil
+	}
+	pr, err := e.pool.txParams(ctx, w, approveGasLimit, e.extraTipWei)
+	if err != nil {
+		return err
+	}
+	tx, err := w.Signer.BuildApprove(e.token, spender, maxUint256(), pr)
+	if err != nil {
+		return fmt.Errorf("build approve: %w", err)
+	}
+	if err := e.pool.send(ctx, w, tx); err != nil {
+		return fmt.Errorf("send approve: %w", err)
+	}
+	if _, err := e.client.WaitReceipt(ctx, tx.Hash(), 60*time.Second); err != nil {
+		return fmt.Errorf("approve confirm: %w", err)
+	}
+	return nil
+}
+
+// unwrapWeth converts a wallet's WETH proceeds back to native ETH (best effort).
+func (e *Engine) unwrapWeth(ctx context.Context, w *Wallet) {
+	weth := common.HexToAddress(pons.V1WETH)
+	bal, err := e.client.TokenBalance(ctx, weth, w.Addr)
+	if err != nil || bal.Sign() == 0 {
+		return
+	}
+	pr, err := e.pool.txParams(ctx, w, withdrawGasLimit, e.extraTipWei)
+	if err != nil {
+		return
+	}
+	tx, err := w.Signer.BuildWethWithdraw(bal, pr)
+	if err != nil {
+		return
+	}
+	if err := e.pool.send(ctx, w, tx); err != nil {
+		e.log.Warn("weth unwrap send failed", "err", err)
+		return
+	}
+	if _, err := e.client.WaitReceipt(ctx, tx.Hash(), 60*time.Second); err == nil {
+		if w.ETHWei != nil {
+			w.ETHWei = new(big.Int).Add(w.ETHWei, bal)
+		}
+	}
+}
+
+// LiquidateAll refreshes balances and sells every wallet's holding of the bound
+// token in a single pass. Used by `collect` before sweeping ETH.
+func (e *Engine) LiquidateAll(ctx context.Context) error {
+	if e.token == (common.Address{}) {
+		return fmt.Errorf("engine not bound to a token")
+	}
+	if err := e.pool.RefreshToken(ctx, e.token); err != nil {
+		return err
+	}
+	e.sellTranche(ctx, 1.0)
+	return nil
+}
+
+// quoteSellAll prices selling our entire holding back to WETH in one hop
+// (approximate: real execution splits across wallets and moves price).
+func (e *Engine) quoteSellAll(ctx context.Context, tokens *big.Int) *big.Int {
+	if tokens == nil || tokens.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	out, err := e.client.QuoteV1Sell(ctx, e.token, tokens)
+	if err != nil {
+		return big.NewInt(0)
+	}
+	return out
+}

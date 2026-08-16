@@ -1,0 +1,177 @@
+package control
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/bizipoopoo/pons-mm-desktop/internal/ponsmm"
+	"github.com/bizipoopoo/pons-mm-desktop/internal/vault"
+)
+
+const (
+	ModeLaunch   = "launch"
+	ModeExisting = "existing"
+)
+
+type Settings struct {
+	RPCEndpoint      string `json:"rpcEndpoint"`
+	GMGNViewerWallet string `json:"gmgnViewerWallet"`
+}
+
+type Socials struct {
+	Twitter   string `json:"twitter"`
+	Telegram  string `json:"telegram"`
+	Discord   string `json:"discord"`
+	Website   string `json:"website"`
+	Farcaster string `json:"farcaster"`
+}
+
+type TokenSpec struct {
+	Name        string  `json:"name"`
+	Symbol      string  `json:"symbol"`
+	Logo        string  `json:"logo"`
+	Description string  `json:"description"`
+	FeeWallet   string  `json:"feeWallet"`
+	Socials     Socials `json:"socials"`
+}
+
+// Strategy is the non-secret persisted definition of one independent pair.
+// WalletIDs reference encrypted vault records; private keys never enter config.
+type Strategy struct {
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Mode                 string    `json:"mode"`
+	Enabled              bool      `json:"enabled"`
+	TokenAddress         string    `json:"tokenAddress"`
+	PoolAddress          string    `json:"poolAddress"`
+	WalletIDs            []string  `json:"walletIds"`
+	Token                TokenSpec `json:"token"`
+	LaunchConfigID       uint64    `json:"launchConfigId"`
+	DexID                uint64    `json:"dexId"`
+	DevBuyETH            float64   `json:"devBuyEth"`
+	BuyFraction          float64   `json:"buyFraction"`
+	AccumulateIntervalMS int64     `json:"accumulateIntervalMs"`
+	ChipTarget           float64   `json:"chipTarget"`
+	Graduate             bool      `json:"graduate"`
+	HighHold             float64   `json:"highHold"`
+	OscillationBand      float64   `json:"oscillationBand"`
+	SellIntervalMS       int64     `json:"sellIntervalMs"`
+	SellTranche          float64   `json:"sellTranche"`
+	SlippageBps          int64     `json:"slippageBps"`
+	PriorityTipGwei      float64   `json:"priorityTipGwei"`
+	GasReserveETH        float64   `json:"gasReserveEth"`
+	CreatedAt            string    `json:"createdAt"`
+	UpdatedAt            string    `json:"updatedAt"`
+}
+
+func NewStrategy() Strategy {
+	now := time.Now().UTC().Format(time.RFC3339)
+	return Strategy{
+		Mode:                 ModeExisting,
+		Enabled:              true,
+		BuyFraction:          0.99,
+		AccumulateIntervalMS: 3000,
+		ChipTarget:           0.9,
+		Graduate:             true,
+		HighHold:             0.60,
+		OscillationBand:      0.20,
+		SellIntervalMS:       4000,
+		SellTranche:          0.25,
+		SlippageBps:          1500,
+		PriorityTipGwei:      1,
+		GasReserveETH:        0.002,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+}
+
+func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
+	return &ponsmm.Config{
+		RPCEndpoint: settings.RPCEndpoint,
+		Token: ponsmm.TokenConfig{
+			Name: s.Token.Name, Symbol: s.Token.Symbol, Logo: s.Token.Logo,
+			Description: s.Token.Description, FeeWallet: s.Token.FeeWallet,
+			Socials: ponsmm.SocialsConfig{
+				Twitter: s.Token.Socials.Twitter, Telegram: s.Token.Socials.Telegram,
+				Discord: s.Token.Socials.Discord, Website: s.Token.Socials.Website,
+				Farcaster: s.Token.Socials.Farcaster,
+			},
+		},
+		LaunchConfigID:     s.LaunchConfigID,
+		DexID:              s.DexID,
+		DevBuyETH:          s.DevBuyETH,
+		BuyFraction:        s.BuyFraction,
+		AccumulateInterval: time.Duration(s.AccumulateIntervalMS) * time.Millisecond,
+		ChipTarget:         s.ChipTarget,
+		Graduate:           s.Graduate,
+		HighHold:           s.HighHold,
+		OscillationBand:    s.OscillationBand,
+		SellInterval:       time.Duration(s.SellIntervalMS) * time.Millisecond,
+		SellTranche:        s.SellTranche,
+		SlippageBps:        s.SlippageBps,
+		PriorityTipGwei:    s.PriorityTipGwei,
+		GasReserveETH:      s.GasReserveETH,
+	}
+}
+
+func (s Strategy) validate(settings Settings) error {
+	if strings.TrimSpace(s.Name) == "" {
+		return errors.New("strategy name is required")
+	}
+	if len(s.WalletIDs) == 0 {
+		return errors.New("select at least one wallet; the first is treasury")
+	}
+	if s.Mode != ModeLaunch && s.Mode != ModeExisting {
+		return errors.New("strategy mode must be launch or existing")
+	}
+	if s.Mode == ModeExisting && (!common.IsHexAddress(s.TokenAddress) || !common.IsHexAddress(s.PoolAddress)) {
+		return errors.New("existing strategy requires valid token and pool addresses")
+	}
+	cfg := s.engineConfig(settings)
+	if err := cfg.Validate(s.Mode == ModeLaunch); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(s.WalletIDs))
+	for _, id := range s.WalletIDs {
+		if seen[id] {
+			return fmt.Errorf("wallet %s is selected more than once", id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+type JobStatus struct {
+	StrategyID  string `json:"strategyId"`
+	State       string `json:"state"`
+	Message     string `json:"message"`
+	StartedAt   string `json:"startedAt"`
+	Token       string `json:"token"`
+	Pool        string `json:"pool"`
+	LastUpdated string `json:"lastUpdated"`
+}
+
+type LogEntry struct {
+	At         string `json:"at"`
+	StrategyID string `json:"strategyId"`
+	Level      string `json:"level"`
+	Message    string `json:"message"`
+}
+
+type VaultState struct {
+	Exists   bool            `json:"exists"`
+	Unlocked bool            `json:"unlocked"`
+	Wallets  []vault.Summary `json:"wallets"`
+}
+
+type Bootstrap struct {
+	Settings   Settings    `json:"settings"`
+	Strategies []Strategy  `json:"strategies"`
+	Jobs       []JobStatus `json:"jobs"`
+	Logs       []LogEntry  `json:"logs"`
+	Vault      VaultState  `json:"vault"`
+}

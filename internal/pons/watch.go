@@ -1,0 +1,187 @@
+package pons
+
+import (
+	"context"
+	"log/slog"
+	"math/big"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+)
+
+// Launch is a newly detected pons launch, normalized from a TokenLaunched log.
+type Launch struct {
+	Token               common.Address
+	Curve               common.Address
+	Deployer            common.Address
+	PairToken           common.Address
+	LaunchConfigID      *big.Int
+	GraduationThreshold *big.Int
+	Block               uint64
+	ObservedAt          time.Time
+}
+
+// WatchLaunches streams new TokenLaunched events from the factory. It prefers a
+// websocket subscription (lowest latency) and falls back to polling getLogs
+// when the endpoint is HTTP-only. The returned channel is closed when ctx ends.
+func (c *Client) WatchLaunches(ctx context.Context, log *slog.Logger) <-chan Launch {
+	out := make(chan Launch, 64)
+	q := ethereum.FilterQuery{
+		Addresses: []common.Address{c.factory},
+		Topics:    [][]common.Hash{{tokenLaunchedTopic}},
+	}
+	go func() {
+		defer close(out)
+		if c.isWebsocket() {
+			if c.subscribeLaunches(ctx, q, out, log) {
+				return // ctx ended during a healthy subscription
+			}
+			log.Warn("pons: log subscription unavailable, falling back to polling")
+		}
+		c.pollLaunches(ctx, q, out, log)
+	}()
+	return out
+}
+
+func (c *Client) isWebsocket() bool {
+	return len(c.rpcURL) >= 3 && (c.rpcURL[:3] == "wss" || c.rpcURL[:2] == "ws")
+}
+
+// subscribeLaunches runs a live log subscription until ctx ends (returns true)
+// or the subscription fails (returns false so the caller can fall back).
+func (c *Client) subscribeLaunches(ctx context.Context, q ethereum.FilterQuery, out chan<- Launch, log *slog.Logger) bool {
+	logs := make(chan types.Log, 64)
+	sub, err := c.eth.SubscribeFilterLogs(ctx, q, logs)
+	if err != nil {
+		log.Warn("pons: SubscribeFilterLogs failed", "err", err)
+		return false
+	}
+	defer sub.Unsubscribe()
+	log.Info("pons: subscribed to factory launches", "factory", c.factory.Hex())
+	for {
+		select {
+		case <-ctx.Done():
+			return true
+		case err := <-sub.Err():
+			log.Warn("pons: launch subscription dropped", "err", err)
+			return false
+		case lg := <-logs:
+			if l, ok := decodeLaunch(lg); ok {
+				emit(ctx, out, l)
+			}
+		}
+	}
+}
+
+// pollLaunches polls getLogs on a fixed cadence, advancing the from-block past
+// what it has already seen.
+func (c *Client) pollLaunches(ctx context.Context, q ethereum.FilterQuery, out chan<- Launch, log *slog.Logger) {
+	from, err := c.eth.BlockNumber(ctx)
+	if err != nil {
+		log.Warn("pons: cannot read head block; starting from 0", "err", err)
+		from = 0
+	}
+	log.Info("pons: polling factory launches", "factory", c.factory.Hex(), "from_block", from)
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			head, err := c.eth.BlockNumber(ctx)
+			if err != nil || head < from {
+				continue
+			}
+			fq := q
+			fq.FromBlock = new(big.Int).SetUint64(from)
+			fq.ToBlock = new(big.Int).SetUint64(head)
+			logs, err := c.eth.FilterLogs(ctx, fq)
+			if err != nil {
+				log.Debug("pons: FilterLogs failed", "err", err)
+				continue
+			}
+			for _, lg := range logs {
+				if l, ok := decodeLaunch(lg); ok {
+					emit(ctx, out, l)
+				}
+			}
+			from = head + 1
+		}
+	}
+}
+
+func emit(ctx context.Context, out chan<- Launch, l Launch) {
+	select {
+	case out <- l:
+	case <-ctx.Done():
+	}
+}
+
+// decodeLaunch turns a TokenLaunched log into a Launch. The three indexed
+// address fields come from topics; the rest from the data section.
+func decodeLaunch(lg types.Log) (Launch, bool) {
+	if len(lg.Topics) < 4 || lg.Topics[0] != tokenLaunchedTopic {
+		return Launch{}, false
+	}
+	var data struct {
+		PairToken           common.Address
+		LaunchConfigID      *big.Int
+		GraduationThreshold *big.Int
+	}
+	if err := factoryABI.UnpackIntoInterface(&data, "TokenLaunched", lg.Data); err != nil {
+		return Launch{}, false
+	}
+	return Launch{
+		Token:               common.HexToAddress(lg.Topics[1].Hex()),
+		Curve:               common.HexToAddress(lg.Topics[2].Hex()),
+		Deployer:            common.HexToAddress(lg.Topics[3].Hex()),
+		PairToken:           data.PairToken,
+		LaunchConfigID:      data.LaunchConfigID,
+		GraduationThreshold: data.GraduationThreshold,
+		Block:               lg.BlockNumber,
+		ObservedAt:          time.Now(),
+	}, true
+}
+
+// WatchCurveTrades subscribes to a single curve's CurveBuy/CurveSell logs so the
+// exit monitor is event-driven (the equivalent of the Solana accountSubscribe
+// feed). Each notification just signals "reserves changed"; the caller re-reads
+// getReserves for authoritative pricing. Falls back to nil (poll-only) if the
+// endpoint cannot subscribe.
+func (c *Client) WatchCurveTrades(ctx context.Context, curve common.Address, log *slog.Logger) <-chan struct{} {
+	if !c.isWebsocket() {
+		return nil
+	}
+	q := ethereum.FilterQuery{
+		Addresses: []common.Address{curve},
+		Topics:    [][]common.Hash{{curveBuyTopic, curveSellTopic}},
+	}
+	logs := make(chan types.Log, 64)
+	sub, err := c.eth.SubscribeFilterLogs(ctx, q, logs)
+	if err != nil {
+		log.Warn("pons: curve trade subscription failed; monitor will poll", "err", err)
+		return nil
+	}
+	out := make(chan struct{}, 64)
+	go func() {
+		defer close(out)
+		defer sub.Unsubscribe()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sub.Err():
+				return
+			case <-logs:
+				select {
+				case out <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	return out
+}

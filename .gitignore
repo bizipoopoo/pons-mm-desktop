@@ -1,0 +1,16 @@
+build/bin
+node_modules
+frontend/dist
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
+*.vault
+*.keys
+*.key
+*.pem
+*.log
+config.json
+dist/
+coverage.out
