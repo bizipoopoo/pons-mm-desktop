@@ -31,7 +31,7 @@ jobs:
         run: wails build -clean -trimpath -platform darwin/universal -o PonsDesk
       - name: Package application
         run: ditto -c -k --sequesterRsrc --keepParent build/bin/PonsDesk.app PonsDesk-macOS-universal.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: PonsDesk-macOS-universal.zip
@@ -61,7 +61,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force release
           Get-ChildItem build/bin -Filter *.exe | Copy-Item -Destination release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: release/*.exe
