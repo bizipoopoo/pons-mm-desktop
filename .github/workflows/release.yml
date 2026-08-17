@@ -29,7 +29,8 @@ jobs:
       - run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
       - name: Build universal macOS application
         run: wails build -clean -trimpath -platform darwin/universal -o PonsDesk
-      - name: Validate Apple signing configuration
+      - name: Detect Apple signing configuration
+        id: apple_signing
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -37,6 +38,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          missing=()
           for name in \
             APPLE_CERTIFICATE_BASE64 \
             APPLE_CERTIFICATE_PASSWORD \
@@ -45,11 +47,19 @@ jobs:
             APPLE_TEAM_ID
           do
             if [[ -z "${!name}" ]]; then
-              echo "::error::Missing required repository secret: ${name}"
-              exit 1
+              missing+=("$name")
             fi
           done
+
+          if (( ${#missing[@]} == 0 )); then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Apple Developer ID signing and notarization are enabled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Apple signing secrets are incomplete; publishing an unsigned macOS test build."
+          fi
       - name: Import Developer ID certificate
+        if: steps.apple_signing.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -82,6 +92,7 @@ jobs:
           fi
           echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
       - name: Sign application
+        if: steps.apple_signing.outputs.enabled == 'true'
         run: |
           codesign \
             --force \
@@ -92,6 +103,7 @@ jobs:
             build/bin/PonsDesk.app
           codesign --verify --deep --strict --verbose=2 build/bin/PonsDesk.app
       - name: Notarize application
+        if: steps.apple_signing.outputs.enabled == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -107,7 +119,7 @@ jobs:
           xcrun stapler staple -v build/bin/PonsDesk.app
           xcrun stapler validate -v build/bin/PonsDesk.app
           spctl --assess --type execute --verbose=4 build/bin/PonsDesk.app
-      - name: Package notarized application
+      - name: Package application
         run: ditto -c -k --sequesterRsrc --keepParent build/bin/PonsDesk.app PonsDesk-macOS-universal.zip
       - name: Remove temporary signing keychain
         if: always()
