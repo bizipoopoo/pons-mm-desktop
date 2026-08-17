@@ -21,7 +21,17 @@ PonsDesk is a native desktop control plane for launching and operating Pons v1 a
 
 Download the latest macOS universal application or Windows x64 installer from [GitHub Releases](https://github.com/bizipoopoo/pons-mm-desktop/releases).
 
-The release workflow signs macOS builds with a Developer ID Application certificate, notarizes them with Apple, and staples the ticket before packaging. Releases `v0.1.1` and earlier were ad-hoc signed and may require approval under **System Settings > Privacy & Security** before their first launch.
+When Apple signing credentials are configured, the release workflow signs macOS builds with a Developer ID Application certificate, notarizes them with Apple, and staples the ticket before packaging. Without those credentials, it publishes an unsigned macOS test build that may require approval under **System Settings > Privacy & Security** before its first launch.
+
+## Donate
+
+If PonsDesk is useful to you, you can support its continued open-source development with an EVM-wallet donation.
+
+**EVM address:** `0xd439325794932c3ccd45affa85effe5363af1ca8`
+
+<img src="docs/evm-donation-qr.svg" alt="QR code for the PonsDesk EVM donation address" width="240">
+
+The QR code contains only the address above. Use an EVM-compatible wallet and network, verify the full address before sending, and confirm that your selected network and token are supported. Blockchain transfers are generally irreversible.
 
 ## First Run
 
@@ -113,7 +123,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The macOS release job deliberately fails instead of publishing an ad-hoc-signed build when any Apple credential is missing. Configure these GitHub Actions repository secrets before creating a release tag:
+When all of the following GitHub Actions repository secrets are configured, the macOS release job signs and notarizes the application. If any credential is missing, the workflow skips signing and publishes an unsigned test build instead:
 
 | Secret | Value |
 | --- | --- |
