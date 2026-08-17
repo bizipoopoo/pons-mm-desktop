@@ -70,6 +70,7 @@ func (a *App) GenerateMnemonic() (string, error) { return a.service.GenerateMnem
 func (a *App) PreflightStrategy(id string) (string, error) { return a.service.Preflight(id) }
 func (a *App) StartStrategy(id, confirmation string) error { return a.service.Start(id, confirmation) }
 func (a *App) StopStrategy(id string) error                { return a.service.Stop(id) }
+func (a *App) ExitStrategy(id, confirmation string) error  { return a.service.ExitAll(id, confirmation) }
 
 func (a *App) ExportGMGN(id string) (string, error) {
 	payload, err := a.service.GMGNImport(id)

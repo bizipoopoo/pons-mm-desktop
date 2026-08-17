@@ -108,6 +108,26 @@ func TestMonitorRetailBuyUpdatesState(t *testing.T) {
 	}
 }
 
+func TestMonitorRetailExitClearsPriceAnchor(t *testing.T) {
+	stranger := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	m := newTestMonitor(testPool(), new(big.Int).SetUint64(1_000_000))
+	m.onTrade(pons.PoolTrade{
+		IsBuy: true, TokenAmount: big.NewInt(1000), WethAmount: big.NewInt(10),
+		Recipient: stranger, Sender: common.HexToAddress("0xRouter"),
+	})
+	m.onTrade(pons.PoolTrade{
+		IsBuy: false, TokenAmount: big.NewInt(1000), WethAmount: big.NewInt(9),
+		Recipient: stranger, Sender: common.HexToAddress("0xRouter"),
+	})
+	snap := m.Snapshot()
+	if snap.RetailNetTokens.Sign() != 0 {
+		t.Fatalf("retail net tokens = %s, want zero", snap.RetailNetTokens)
+	}
+	if snap.RetailLastBuyPx != nil {
+		t.Fatal("retail price anchor must be cleared after the tracked position exits")
+	}
+}
+
 func TestSnapshotHoldFraction(t *testing.T) {
 	supply := new(big.Int).SetUint64(1_000_000)
 	m := newTestMonitor(testPool(), supply)

@@ -14,6 +14,10 @@ export function DeleteStrategy(arg1) {
   return window['go']['main']['App']['DeleteStrategy'](arg1);
 }
 
+export function ExitStrategy(arg1, arg2) {
+  return window['go']['main']['App']['ExitStrategy'](arg1, arg2);
+}
+
 export function ExportGMGN(arg1) {
   return window['go']['main']['App']['ExportGMGN'](arg1);
 }

@@ -56,11 +56,13 @@ type Strategy struct {
 	DevBuyETH            float64   `json:"devBuyEth"`
 	BuyFraction          float64   `json:"buyFraction"`
 	AccumulateIntervalMS int64     `json:"accumulateIntervalMs"`
+	ConcurrentBuys       bool      `json:"concurrentBuys"`
 	ChipTarget           float64   `json:"chipTarget"`
 	Graduate             bool      `json:"graduate"`
 	HighHold             float64   `json:"highHold"`
 	OscillationBand      float64   `json:"oscillationBand"`
 	SellIntervalMS       int64     `json:"sellIntervalMs"`
+	SequentialSells      bool      `json:"sequentialSells"`
 	SellTranche          float64   `json:"sellTranche"`
 	SlippageBps          int64     `json:"slippageBps"`
 	PriorityTipGwei      float64   `json:"priorityTipGwei"`
@@ -76,12 +78,14 @@ func NewStrategy() Strategy {
 		Protocol:             ponsmm.ProtocolV2,
 		Enabled:              true,
 		BuyFraction:          0.99,
-		AccumulateIntervalMS: 3000,
+		AccumulateIntervalMS: 1000,
+		ConcurrentBuys:       false,
 		ChipTarget:           0.9,
 		Graduate:             true,
 		HighHold:             0.60,
 		OscillationBand:      0.20,
-		SellIntervalMS:       4000,
+		SellIntervalMS:       1000,
+		SequentialSells:      false,
 		SellTranche:          0.25,
 		SlippageBps:          1500,
 		PriorityTipGwei:      1,
@@ -109,11 +113,13 @@ func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
 		DevBuyETH:          s.DevBuyETH,
 		BuyFraction:        s.BuyFraction,
 		AccumulateInterval: time.Duration(s.AccumulateIntervalMS) * time.Millisecond,
+		ConcurrentBuys:     s.ConcurrentBuys,
 		ChipTarget:         s.ChipTarget,
 		Graduate:           s.Graduate,
 		HighHold:           s.HighHold,
 		OscillationBand:    s.OscillationBand,
 		SellInterval:       time.Duration(s.SellIntervalMS) * time.Millisecond,
+		ConcurrentSells:    !s.SequentialSells,
 		SellTranche:        s.SellTranche,
 		SlippageBps:        s.SlippageBps,
 		PriorityTipGwei:    s.PriorityTipGwei,

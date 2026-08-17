@@ -151,11 +151,13 @@ export namespace control {
 	    devBuyEth: number;
 	    buyFraction: number;
 	    accumulateIntervalMs: number;
+	    concurrentBuys: boolean;
 	    chipTarget: number;
 	    graduate: boolean;
 	    highHold: number;
 	    oscillationBand: number;
 	    sellIntervalMs: number;
+	    sequentialSells: boolean;
 	    sellTranche: number;
 	    slippageBps: number;
 	    priorityTipGwei: number;
@@ -183,11 +185,13 @@ export namespace control {
 	        this.devBuyEth = source["devBuyEth"];
 	        this.buyFraction = source["buyFraction"];
 	        this.accumulateIntervalMs = source["accumulateIntervalMs"];
+	        this.concurrentBuys = source["concurrentBuys"];
 	        this.chipTarget = source["chipTarget"];
 	        this.graduate = source["graduate"];
 	        this.highHold = source["highHold"];
 	        this.oscillationBand = source["oscillationBand"];
 	        this.sellIntervalMs = source["sellIntervalMs"];
+	        this.sequentialSells = source["sequentialSells"];
 	        this.sellTranche = source["sellTranche"];
 	        this.slippageBps = source["slippageBps"];
 	        this.priorityTipGwei = source["priorityTipGwei"];

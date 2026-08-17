@@ -49,14 +49,16 @@ type Config struct {
 
 	// Accumulation.
 	BuyFraction        float64       `yaml:"buy_fraction"`        // fraction of a wallet's spendable ETH per buy (default 0.99)
-	AccumulateInterval time.Duration `yaml:"accumulate_interval"` // idle cadence between accumulation buys (default 3s)
+	AccumulateInterval time.Duration `yaml:"accumulate_interval"` // minimum cadence between accumulation rounds (default 1s)
+	ConcurrentBuys     bool          `yaml:"concurrent_buys"`     // buy from every funded maker in the same round
 	ChipTarget         float64       `yaml:"chip_target"`         // target fraction of circulating supply to hold before easing off (default 0.9)
 	Graduate           bool          `yaml:"graduate"`            // keep buying until the pool reaches the graduation threshold
 
 	// Market making.
 	HighHold        float64       `yaml:"high_hold"`        // our holding of circulating at/above which we oscillate instead of distributing (default 0.60)
-	OscillationBand float64       `yaml:"oscillation_band"` // +/- price band around the retail cost to churn (default 0.20)
-	SellInterval    time.Duration `yaml:"sell_interval"`    // cadence between slow-sell tranches (default 4s)
+	OscillationBand float64       `yaml:"oscillation_band"` // lower band below the retail price anchor (default 0.20)
+	SellInterval    time.Duration `yaml:"sell_interval"`    // minimum cadence between sell rounds (default 1s)
+	ConcurrentSells bool          `yaml:"concurrent_sells"` // sell every wallet's tranche concurrently (default true)
 	SellTranche     float64       `yaml:"sell_tranche"`     // fraction of remaining holding sold per distribute tranche (default 0.25)
 
 	// Execution.
@@ -91,12 +93,14 @@ func DefaultConfig() Config {
 	return Config{
 		Protocol:           ProtocolV2,
 		BuyFraction:        0.99,
-		AccumulateInterval: 3 * time.Second,
+		AccumulateInterval: time.Second,
+		ConcurrentBuys:     false,
 		ChipTarget:         0.9,
 		Graduate:           true,
 		HighHold:           0.60,
 		OscillationBand:    0.20,
-		SellInterval:       4 * time.Second,
+		SellInterval:       time.Second,
+		ConcurrentSells:    true,
 		SellTranche:        0.25,
 		SlippageBps:        1500,
 		PriorityTipGwei:    1,

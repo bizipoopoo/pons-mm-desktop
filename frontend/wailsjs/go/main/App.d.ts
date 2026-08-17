@@ -9,6 +9,8 @@ export function CreateVault(arg1:string):Promise<void>;
 
 export function DeleteStrategy(arg1:string):Promise<void>;
 
+export function ExitStrategy(arg1:string,arg2:string):Promise<void>;
+
 export function ExportGMGN(arg1:string):Promise<string>;
 
 export function GenerateMnemonic():Promise<string>;

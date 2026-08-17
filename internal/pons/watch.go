@@ -128,7 +128,7 @@ func decodeLaunch(lg types.Log) (Launch, bool) {
 	}
 	var data struct {
 		PairToken           common.Address
-		LaunchConfigID      *big.Int
+		LaunchConfigID      *big.Int `abi:"launchConfigId"`
 		GraduationThreshold *big.Int
 	}
 	if err := factoryABI.UnpackIntoInterface(&data, "TokenLaunched", lg.Data); err != nil {
@@ -180,7 +180,10 @@ func (c *Client) WatchCurveTradeEvents(ctx context.Context, curve common.Address
 			select {
 			case <-ctx.Done():
 				return
-			case <-sub.Err():
+			case err := <-sub.Err():
+				if err != nil {
+					log.Warn("pons: curve trade subscription dropped", "err", err)
+				}
 				return
 			case lg := <-logs:
 				trade, ok := decodeCurveTrade(lg)

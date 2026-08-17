@@ -3,6 +3,7 @@ package ponsmm
 import (
 	"math/big"
 	"testing"
+	"time"
 )
 
 func TestRetailBuyResponse(t *testing.T) {
@@ -23,6 +24,18 @@ func TestRetailBuyResponse(t *testing.T) {
 					c.proceeds, c.cost, got, c.want)
 			}
 		})
+	}
+}
+
+func TestRetailResponseFraction(t *testing.T) {
+	if got := retailResponseFraction(big.NewInt(2), big.NewInt(100), 0.25); got < 0.0199 || got > 0.0201 {
+		t.Fatalf("small retail response = %f, want 0.02", got)
+	}
+	if got := retailResponseFraction(big.NewInt(50), big.NewInt(100), 0.25); got != 0.05 {
+		t.Fatalf("retail response cap = %f, want 0.05", got)
+	}
+	if got := retailResponseFraction(big.NewInt(50), big.NewInt(100), 0.03); got != 0.03 {
+		t.Fatalf("configured tranche cap = %f, want 0.03", got)
 	}
 }
 
@@ -97,6 +110,9 @@ func TestConfigProtocolCompatibility(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.ProtocolName() != ProtocolV2 {
 		t.Fatalf("new config protocol = %q, want v2", cfg.ProtocolName())
+	}
+	if cfg.AccumulateInterval != time.Second || cfg.SellInterval != time.Second || cfg.ConcurrentBuys || !cfg.ConcurrentSells {
+		t.Fatalf("unexpected execution defaults: %+v", cfg)
 	}
 	legacy := Config{}
 	if legacy.ProtocolName() != ProtocolV1 {

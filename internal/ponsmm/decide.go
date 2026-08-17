@@ -31,6 +31,27 @@ func retailBuyResponse(holdFrac, highHold float64, sellAllProceeds, ourCost *big
 	return Distributing
 }
 
+// retailResponseFraction sells no more than the incoming retail token amount,
+// caps the immediate response at 5% of our position, and still respects a
+// smaller configured sell tranche.
+func retailResponseFraction(retailTokens, ourTokens *big.Int, sellTranche float64) float64 {
+	if retailTokens == nil || ourTokens == nil || retailTokens.Sign() <= 0 || ourTokens.Sign() <= 0 || sellTranche <= 0 {
+		return 0
+	}
+	capFraction := 0.05
+	if sellTranche < capFraction {
+		capFraction = sellTranche
+	}
+	ratio, _ := new(big.Float).Quo(
+		new(big.Float).SetInt(retailTokens),
+		new(big.Float).SetInt(ourTokens),
+	).Float64()
+	if ratio < capFraction {
+		return ratio
+	}
+	return capFraction
+}
+
 // oscillationAction keeps the market price under the retail cost anchor. The
 // band spans [anchor*(1-band), anchor]: above the anchor we sell to push price
 // down, below the lower edge we buy to lift it, in between we hold.

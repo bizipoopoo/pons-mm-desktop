@@ -2,11 +2,11 @@ import {useEffect, useMemo, useState} from 'react';
 import {
     Activity, AlertTriangle, Check, ChevronDown, ChevronUp, CircleDollarSign,
     Copy, Download, Edit3, Eye, EyeOff, FileCheck2, Gauge, KeyRound, LayoutDashboard,
-    ListFilter, Lock, LockOpen, Plus, Radio, RefreshCw, Save, Settings as SettingsIcon,
+    ListFilter, Lock, LockOpen, LogOut, Plus, Radio, RefreshCw, Save, Settings as SettingsIcon,
     ShieldCheck, Square, SquareTerminal, StopCircle, Trash2, Upload, WalletCards, X,
 } from 'lucide-react';
 import {
-    Bootstrap, CreateVault, DeleteStrategy, ExportGMGN, GenerateMnemonic,
+    Bootstrap, CreateVault, DeleteStrategy, ExitStrategy, ExportGMGN, GenerateMnemonic,
     ImportMnemonic, ImportPrivateKeys, LockVault, NewStrategy, PreflightStrategy,
     SaveSettings, SaveStrategy, StartStrategy, StopStrategy, UnlockVault,
 } from '../wailsjs/go/main/App';
@@ -18,9 +18,9 @@ type Page = 'overview' | 'strategies' | 'wallets' | 'logs' | 'settings';
 type Toast = {kind: 'success' | 'error' | 'info'; text: string};
 
 const short = (value = '') => value.length > 15 ? `${value.slice(0, 7)}...${value.slice(-5)}` : value || '-';
-const isActive = (state?: string) => ['starting', 'running', 'stopping'].includes(state || '');
+const isActive = (state?: string) => ['starting', 'running', 'stopping', 'exiting'].includes(state || '');
 const stateLabel: Record<string, string> = {
-    starting: 'Starting', running: 'Running', stopping: 'Stopping', stopped: 'Stopped', error: 'Error',
+    starting: 'Starting', running: 'Running', stopping: 'Stopping', exiting: 'Exiting', stopped: 'Stopped', error: 'Error',
 };
 
 function App() {
@@ -29,6 +29,7 @@ function App() {
     const [toast, setToast] = useState<Toast | null>(null);
     const [editing, setEditing] = useState<control.Strategy | null>(null);
     const [liveTarget, setLiveTarget] = useState<control.Strategy | null>(null);
+    const [exitTarget, setExitTarget] = useState<control.Strategy | null>(null);
     const [busy, setBusy] = useState('');
 
     const notify = (kind: Toast['kind'], text: string) => {
@@ -107,8 +108,8 @@ function App() {
             </header>
 
             <div className="content">
-                {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop}/>}
-                {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onPreflight={preflight} notify={notify}/>}
+                {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget}/>}
+                {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} notify={notify}/>}
                 {page === 'wallets' && <WalletVault state={data.vault} notify={notify}/>}
                 {page === 'logs' && <Logs logs={data.logs || []} strategies={data.strategies || []}/>}
                 {page === 'settings' && <SettingsPage initial={data.settings} notify={notify}/>}
@@ -125,13 +126,19 @@ function App() {
             catch (e) { notify('error', String(e)); }
             finally { setBusy(''); }
         }}/>}
+        {exitTarget && <ExitDialog strategy={exitTarget} busy={busy === `exit:${exitTarget.id}`} onClose={() => setExitTarget(null)} onConfirm={async () => {
+            setBusy(`exit:${exitTarget.id}`);
+            try { await ExitStrategy(exitTarget.id, 'EXIT'); notify('success', `${exitTarget.name} exited all token positions`); setExitTarget(null); }
+            catch (e) { notify('error', String(e)); }
+            finally { setBusy(''); }
+        }}/>}
         {toast && <div className={`toast ${toast.kind}`}>{toast.kind === 'error' ? <AlertTriangle size={17}/> : <Check size={17}/>}<span>{toast.text}</span></div>}
     </div>;
 }
 
-function Overview({data, jobs, onNavigate, onEdit, onStart, onStop}: {
+function Overview({data, jobs, onNavigate, onEdit, onStart, onStop, onExit}: {
     data: control.Bootstrap; jobs: Map<string, control.JobStatus>; onNavigate: (p: Page) => void;
-    onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void;
+    onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void; onExit: (s: control.Strategy) => void;
 }) {
     const running = [...jobs.values()].filter(j => isActive(j.state)).length;
     const errors = [...jobs.values()].filter(j => j.state === 'error').length;
@@ -144,7 +151,7 @@ function Overview({data, jobs, onNavigate, onEdit, onStart, onStop}: {
         </section>
         <section className="section-block">
             <div className="section-heading"><div><h2>Strategy control</h2><p>Independent wallet pools can run in parallel.</p></div><button className="secondary" onClick={() => onNavigate('strategies')}><ListFilter size={16}/> Manage</button></div>
-            <StrategyTable strategies={data.strategies || []} jobs={jobs} onEdit={onEdit} onStart={onStart} onStop={onStop}/>
+            <StrategyTable strategies={data.strategies || []} jobs={jobs} onEdit={onEdit} onStart={onStart} onStop={onStop} onExit={onExit}/>
         </section>
         <section className="split-section">
             <div className="section-block compact"><div className="section-heading"><div><h2>Recent activity</h2><p>Latest engine messages across all pairs.</p></div><button className="icon-button" title="Open logs" onClick={() => onNavigate('logs')}><SquareTerminal size={17}/></button></div>
@@ -157,9 +164,9 @@ function Overview({data, jobs, onNavigate, onEdit, onStart, onStop}: {
     </>;
 }
 
-function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onPreflight, notify}: {
+function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, onPreflight, notify}: {
     data: control.Bootstrap; jobs: Map<string, control.JobStatus>; busy: string; onAdd: () => void;
-    onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void;
+    onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void; onExit: (s: control.Strategy) => void;
     onPreflight: (s: control.Strategy) => void; notify: (k: Toast['kind'], t: string) => void;
 }) {
     const remove = async (s: control.Strategy) => {
@@ -185,7 +192,7 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onPreflig
                     <Status state={job?.state} message={job?.message}/>
                     <div className="row-actions">
                         <button title="Preflight" disabled={active || busy === `preflight:${s.id}`} onClick={() => onPreflight(s)}><FileCheck2 size={16}/></button>
-                        {active ? <button className="danger-icon" title="Stop" onClick={() => onStop(s.id)}><StopCircle size={16}/></button> : <button className="start-icon" title="Start live" onClick={() => onStart(s)}><Activity size={16}/></button>}
+                        {active ? <><button className="danger-icon" title="Stop without selling" disabled={job?.state === 'exiting'} onClick={() => onStop(s.id)}><StopCircle size={16}/></button>{job?.state === 'running' && <button className="exit-icon" title="One-click exit: sell all" onClick={() => onExit(s)}><LogOut size={16}/></button>}</> : <button className="start-icon" title="Start live" onClick={() => onStart(s)}><Activity size={16}/></button>}
                         <button title="Export GMGN tags" disabled={!data.vault.unlocked} onClick={() => exportGMGN(s)}><Download size={16}/></button>
                         <button title="Edit" disabled={active} onClick={() => onEdit(s)}><Edit3 size={16}/></button>
                         <button title="Delete" disabled={active} onClick={() => remove(s)}><Trash2 size={16}/></button>
@@ -197,15 +204,15 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onPreflig
     </section>;
 }
 
-function StrategyTable({strategies, jobs, onEdit, onStart, onStop}: {
+function StrategyTable({strategies, jobs, onEdit, onStart, onStop, onExit}: {
     strategies: control.Strategy[]; jobs: Map<string, control.JobStatus>;
-    onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void;
+    onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void; onExit: (s: control.Strategy) => void;
 }) {
     return <div className="data-table overview-table"><div className="table-head"><span>Strategy</span><span>Token / pool</span><span>Status</span><span>Action</span></div>
         {strategies.slice(0, 8).map(s => { const job = jobs.get(s.id); const active = isActive(job?.state); return <div className="table-row" key={s.id}>
             <div className="name-cell"><span className="pair-icon">{(s.token?.symbol || s.name).slice(0, 2).toUpperCase()}</span><div><strong>{s.name}</strong><small>{s.walletIds?.length || 0} wallets</small></div></div>
             <div className="mono-cell"><strong>{short(s.tokenAddress)}</strong><small>{short(s.poolAddress)}</small></div><Status state={job?.state} message={job?.message}/>
-            <div className="row-actions"><button title="Edit" disabled={active} onClick={() => onEdit(s)}><Edit3 size={16}/></button>{active ? <button className="danger-icon" title="Stop" onClick={() => onStop(s.id)}><StopCircle size={16}/></button> : <button className="start-icon" title="Start live" onClick={() => onStart(s)}><Activity size={16}/></button>}</div>
+            <div className="row-actions"><button title="Edit" disabled={active} onClick={() => onEdit(s)}><Edit3 size={16}/></button>{active ? <><button className="danger-icon" title="Stop without selling" disabled={job?.state === 'exiting'} onClick={() => onStop(s.id)}><StopCircle size={16}/></button>{job?.state === 'running' && <button className="exit-icon" title="One-click exit: sell all" onClick={() => onExit(s)}><LogOut size={16}/></button>}</> : <button className="start-icon" title="Start live" onClick={() => onStart(s)}><Activity size={16}/></button>}</div>
         </div>; })}
         {!strategies.length && <Empty text="Create a strategy to begin"/>}
     </div>;
@@ -255,7 +262,12 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
                 <div className="available-wallets"><strong>Available wallets</strong>{wallets.filter(w => !selected.includes(w.id)).map(w => <button key={w.id} onClick={() => toggleWallet(w.id)}><Plus size={15}/><span>{w.label}</span><small className="mono">{short(w.address)}</small></button>)}</div>
             </div>}
             {tab === 'execution' && <div className="form-stack">
-                <div className="form-grid three"><NumberField label="Buy fraction" value={draft.buyFraction} step={0.01} min={0.01} max={1} onChange={v => set('buyFraction', v)}/><NumberField label="Accumulate interval (ms)" value={draft.accumulateIntervalMs} step={100} min={100} onChange={v => set('accumulateIntervalMs', v)}/><NumberField label="Chip target" value={draft.chipTarget} step={0.05} min={0.05} max={1} onChange={v => set('chipTarget', v)}/><NumberField label="High hold threshold" value={draft.highHold} step={0.05} min={0.05} max={1} onChange={v => set('highHold', v)}/><NumberField label="Oscillation band" value={draft.oscillationBand} step={0.01} min={0.01} max={0.99} onChange={v => set('oscillationBand', v)}/><NumberField label="Sell interval (ms)" value={draft.sellIntervalMs} step={100} min={100} onChange={v => set('sellIntervalMs', v)}/><NumberField label="Sell tranche" value={draft.sellTranche} step={0.05} min={0.05} max={1} onChange={v => set('sellTranche', v)}/><NumberField label="Slippage (bps)" value={draft.slippageBps} step={50} min={0} max={9999} onChange={v => set('slippageBps', v)}/><NumberField label="Priority tip (gwei)" value={draft.priorityTipGwei} step={0.1} min={0} onChange={v => set('priorityTipGwei', v)}/><NumberField label="Gas reserve (ETH)" value={draft.gasReserveEth} step={0.001} min={0} onChange={v => set('gasReserveEth', v)}/></div>
+                <SpeedField label="Buy speed" value={draft.accumulateIntervalMs} onChange={v => set('accumulateIntervalMs', v)}/>
+                <label className="toggle-line"><input type="checkbox" checked={Boolean(draft.concurrentBuys)} onChange={e => set('concurrentBuys', e.target.checked)}/><span className="toggle"/><div><strong>Concurrent buys</strong><small>Submit one buy from every funded maker in the same round.</small></div></label>
+                <SpeedField label="Sell speed" value={draft.sellIntervalMs} onChange={v => set('sellIntervalMs', v)}/>
+                <label className="toggle-line"><input type="checkbox" checked={!Boolean(draft.sequentialSells)} onChange={e => set('sequentialSells', !e.target.checked)}/><span className="toggle"/><div><strong>Concurrent sells</strong><small>Enabled by default; sell each wallet's tranche in parallel.</small></div></label>
+                <div className="inline-note"><Gauge size={17}/><span>Speed is the minimum interval between rounds. Network confirmation can make the effective interval longer.</span></div>
+                <div className="form-grid three"><NumberField label="Buy fraction" value={draft.buyFraction} step={0.01} min={0.01} max={1} onChange={v => set('buyFraction', v)}/><NumberField label="Chip target" value={draft.chipTarget} step={0.05} min={0.05} max={1} onChange={v => set('chipTarget', v)}/><NumberField label="High hold threshold" value={draft.highHold} step={0.05} min={0.05} max={1} onChange={v => set('highHold', v)}/><NumberField label="Oscillation band" value={draft.oscillationBand} step={0.01} min={0.01} max={0.99} onChange={v => set('oscillationBand', v)}/><NumberField label="Sell tranche" value={draft.sellTranche} step={0.05} min={0.05} max={1} onChange={v => set('sellTranche', v)}/><NumberField label="Slippage (bps)" value={draft.slippageBps} step={50} min={0} max={9999} onChange={v => set('slippageBps', v)}/><NumberField label="Priority tip (gwei)" value={draft.priorityTipGwei} step={0.1} min={0} onChange={v => set('priorityTipGwei', v)}/><NumberField label="Gas reserve (ETH)" value={draft.gasReserveEth} step={0.001} min={0} onChange={v => set('gasReserveEth', v)}/></div>
                 <label className="toggle-line"><input type="checkbox" checked={Boolean(draft.graduate)} onChange={e => set('graduate', e.target.checked)}/><span className="toggle"/><div><strong>Continue until graduation threshold</strong><small>Accumulate until paired principal reaches the configured launch threshold.</small></div></label>
             </div>}
         </div>
@@ -305,6 +317,11 @@ function LiveDialog({strategy, onClose, onConfirm}: {strategy: control.Strategy;
     return <Modal title={strategy.mode === 'launch' ? 'Launch token and start market maker' : 'Start live market maker'} subtitle={strategy.name} onClose={onClose}><div className="risk-box"><AlertTriangle size={20}/><div><strong>This sends real transactions</strong><p>Selected wallets can spend ETH, pay gas, buy, approve, and sell tokens according to this strategy.</p></div></div><Field label="Type LIVE to confirm"><input autoFocus value={phrase} onChange={e => setPhrase(e.target.value.toUpperCase())}/></Field><div className="dialog-footer"><button className="secondary" onClick={onClose}>Cancel</button><button className="danger" disabled={phrase !== 'LIVE'} onClick={onConfirm}><Activity size={16}/>{strategy.mode === 'launch' ? 'Launch and run' : 'Start live'}</button></div></Modal>;
 }
 
+function ExitDialog({strategy, busy, onClose, onConfirm}: {strategy: control.Strategy; busy: boolean; onClose: () => void; onConfirm: () => void}) {
+    const [phrase, setPhrase] = useState('');
+    return <Modal title="One-click exit" subtitle={strategy.name} onClose={busy ? () => {} : onClose}><div className="risk-box"><AlertTriangle size={20}/><div><strong>This sells every token balance</strong><p>PonsDesk will stop normal strategy decisions and concurrently batch-sell 100% of the token held by the treasury and all maker wallets. This action overrides the normal sell concurrency setting, pays gas, may require approvals, and cannot be undone.</p></div></div><Field label="Type EXIT to confirm"><input autoFocus disabled={busy} value={phrase} onChange={e => setPhrase(e.target.value.toUpperCase())}/></Field><div className="dialog-footer"><button className="secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="danger" disabled={busy || phrase !== 'EXIT'} onClick={onConfirm}><LogOut size={16}/>{busy ? 'Selling all positions' : 'Exit all positions'}</button></div></Modal>;
+}
+
 function Modal({title, subtitle, onClose, children, wide = false}: {title: string; subtitle?: string; onClose: () => void; children: React.ReactNode; wide?: boolean}) {
     return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><div className={`modal ${wide ? 'wide' : ''}`}><div className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" title="Close" onClick={onClose}><X size={18}/></button></div>{children}</div></div>;
 }
@@ -314,6 +331,11 @@ function Status({state = 'stopped', message}: {state?: string; message?: string}
 function CheckRow({ok, label}: {ok: boolean; label: string}) { return <div className={ok ? 'ok' : ''}>{ok ? <Check size={16}/> : <Square size={16}/>}<span>{label}</span></div>; }
 function Field({label, children}: {label: string; children: React.ReactNode}) { return <label className="field"><span>{label}</span>{children}</label>; }
 function NumberField({label, value, onChange, ...props}: {label: string; value: number; onChange: (value: number) => void; step?: number; min?: number; max?: number}) { return <Field label={label}><input type="number" value={value ?? 0} onChange={e => onChange(Number(e.target.value))} {...props}/></Field>; }
+const speedOptions = [{label: 'Extreme · 100ms', value: 100}, {label: 'Fast · 500ms', value: 500}, {label: 'Slow · 1s', value: 1000}, {label: 'Very slow · 1m', value: 60000}];
+function SpeedField({label, value, onChange}: {label: string; value: number; onChange: (value: number) => void}) {
+    const preset = speedOptions.some(option => option.value === value);
+    return <Field label={label}><div className="segmented speed-options">{speedOptions.map(option => <button type="button" key={option.value} className={value === option.value ? 'active' : ''} onClick={() => onChange(option.value)}>{option.label}</button>)}</div>{!preset && <small className="field-note">Legacy custom interval: {value}ms. Choose one of the four presets to change it.</small>}</Field>;
+}
 function Empty({text, action}: {text: string; action?: React.ReactNode}) { return <div className="empty"><Radio size={20}/><span>{text}</span>{action}</div>; }
 
 function upsert<T extends Record<string, any>>(items: T[], value: T, key: keyof T): T[] {

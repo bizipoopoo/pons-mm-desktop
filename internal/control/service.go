@@ -23,10 +23,14 @@ import (
 const maxLogs = 800
 
 type runningJob struct {
-	status    JobStatus
-	cancel    context.CancelFunc
-	walletIDs []string
-	active    bool
+	status        JobStatus
+	cancel        context.CancelFunc
+	walletIDs     []string
+	active        bool
+	engine        *ponsmm.Engine
+	engineReady   chan struct{}
+	engineReadyDo sync.Once
+	exitRequested bool
 }
 
 // Service coordinates persistent config, encrypted wallets, and concurrent
@@ -252,6 +256,7 @@ func (s *Service) Start(id, confirmation string) error {
 	job := &runningJob{
 		status: JobStatus{StrategyID: id, State: "starting", Message: "Connecting to Robinhood Chain", StartedAt: now, LastUpdated: now},
 		cancel: cancel, walletIDs: append([]string(nil), strategy.WalletIDs...), active: true,
+		engineReady: make(chan struct{}),
 	}
 	s.jobs[id] = job
 	for _, walletID := range strategy.WalletIDs {
@@ -270,6 +275,10 @@ func (s *Service) Stop(id string) error {
 		s.mu.Unlock()
 		return errors.New("strategy is not running")
 	}
+	if job.exitRequested {
+		s.mu.Unlock()
+		return errors.New("one-click exit is already in progress")
+	}
 	job.status.State = "stopping"
 	job.status.Message = "Waiting for the current operation to stop"
 	job.status.LastUpdated = time.Now().UTC().Format(time.RFC3339)
@@ -279,6 +288,51 @@ func (s *Service) Stop(id string) error {
 	s.emitJob(status)
 	cancel()
 	return nil
+}
+
+// ExitAll asks a running engine to stop its normal strategy and concurrently
+// sell the complete token balance of every assigned wallet.
+func (s *Service) ExitAll(id, confirmation string) error {
+	if confirmation != "EXIT" {
+		return errors.New("one-click exit confirmation phrase is required")
+	}
+	s.mu.Lock()
+	job := s.jobs[id]
+	if job == nil || !job.active {
+		s.mu.Unlock()
+		return errors.New("strategy is not running")
+	}
+	if job.exitRequested {
+		s.mu.Unlock()
+		return errors.New("one-click exit is already in progress")
+	}
+	job.exitRequested = true
+	job.status.State = "exiting"
+	job.status.Message = "Selling all strategy token balances"
+	job.status.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	status := job.status
+	ready := job.engineReady
+	s.mu.Unlock()
+	s.emitJob(status)
+
+	select {
+	case <-ready:
+	case <-time.After(45 * time.Second):
+		return errors.New("strategy engine was not ready for one-click exit")
+	}
+	s.mu.RLock()
+	job = s.jobs[id]
+	var eng *ponsmm.Engine
+	if job != nil {
+		eng = job.engine
+	}
+	s.mu.RUnlock()
+	if eng == nil {
+		return errors.New("strategy stopped before one-click exit could begin")
+	}
+	ctx, cancel := context.WithTimeout(s.root, 5*time.Minute)
+	defer cancel()
+	return eng.ExitAll(ctx)
 }
 
 func (s *Service) Shutdown() {
@@ -320,12 +374,39 @@ func (s *Service) runStrategy(ctx context.Context, strategy Strategy, settings S
 		return
 	}
 	token, poolAddr := eng.Binding()
-	s.updateJob(strategy.ID, "running", fmt.Sprintf("Pons %s market maker is active", strategy.protocolName()), token.Hex(), poolAddr.Hex())
+	if !s.attachEngine(strategy.ID, eng) {
+		s.updateJob(strategy.ID, "running", fmt.Sprintf("Pons %s market maker is active", strategy.protocolName()), token.Hex(), poolAddr.Hex())
+	}
 	if err := eng.Run(ctx); err != nil {
 		s.finish(strategy.ID, "error", err.Error(), token.Hex(), poolAddr.Hex())
 		return
 	}
-	s.finish(strategy.ID, "stopped", "Strategy stopped", token.Hex(), poolAddr.Hex())
+	message := "Strategy stopped"
+	if s.exitWasRequested(strategy.ID) {
+		message = "One-click exit completed"
+	}
+	s.finish(strategy.ID, "stopped", message, token.Hex(), poolAddr.Hex())
+}
+
+// attachEngine publishes the live engine and returns whether an exit was
+// requested while setup/binding was still in progress.
+func (s *Service) attachEngine(id string, eng *ponsmm.Engine) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.jobs[id]
+	if job == nil {
+		return false
+	}
+	job.engine = eng
+	job.engineReadyDo.Do(func() { close(job.engineReady) })
+	return job.exitRequested
+}
+
+func (s *Service) exitWasRequested(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	job := s.jobs[id]
+	return job != nil && job.exitRequested
 }
 
 func setupEngine(ctx context.Context, strategy Strategy, settings Settings, keys []string, logger *slog.Logger) (*pons.Client, *ponsmm.Pool, *ponsmm.Config, error) {
@@ -378,6 +459,7 @@ func (s *Service) finish(id, state, message, token, pool string) {
 	job.status.Token, job.status.Pool = token, pool
 	job.status.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	job.active = false
+	job.engineReadyDo.Do(func() { close(job.engineReady) })
 	for _, walletID := range job.walletIDs {
 		if s.usedWallets[walletID] == id {
 			delete(s.usedWallets, walletID)

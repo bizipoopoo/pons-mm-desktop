@@ -98,8 +98,8 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .table-row { min-height: 62px; border-bottom: 1px solid #2c3236; font-size: 12px; }
 .table-row:last-child { border-bottom: 0; }
 .table-row:hover { background: #202529; }
-.strategy-list .table-head, .strategy-list .table-row { grid-template-columns: minmax(160px, 1.1fr) minmax(150px, .9fr) minmax(115px, .7fr) 78px minmax(120px, .9fr) 172px; }
-.overview-table .table-head, .overview-table .table-row { grid-template-columns: minmax(170px, 1fr) minmax(160px, .8fr) minmax(150px, .9fr) 88px; }
+.strategy-list .table-head, .strategy-list .table-row { grid-template-columns: minmax(160px, 1.1fr) minmax(150px, .9fr) minmax(115px, .7fr) 78px minmax(120px, .9fr) 205px; }
+.overview-table .table-head, .overview-table .table-row { grid-template-columns: minmax(170px, 1fr) minmax(160px, .8fr) minmax(150px, .9fr) 112px; }
 .wallet-table .table-head, .wallet-table .table-row { grid-template-columns: minmax(150px, .65fr) minmax(320px, 1.4fr) 90px; }
 .name-cell { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .name-cell > div { min-width: 0; }
@@ -116,13 +116,15 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .status-cell small { display: block; color: var(--muted); font-size: 9px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #657078; }
 .status-dot.running, .status-dot.starting { background: var(--green); box-shadow: 0 0 0 3px rgba(69, 210, 145, .1); }
-.status-dot.stopping { background: var(--amber); }
+.status-dot.stopping, .status-dot.exiting { background: var(--amber); }
 .status-dot.error { background: var(--red); }
 .row-actions { display: flex; justify-content: flex-end; gap: 5px; }
 .row-actions button { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 5px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; }
 .row-actions button:hover { border-color: var(--border); background: var(--surface-3); color: var(--text); }
 .row-actions button.start-icon { color: var(--green); }
 .row-actions button.danger-icon { color: var(--red); }
+.row-actions button.exit-icon { color: #ff9f68; border-color: #6f3d28; background: #352219; }
+.row-actions button.exit-icon:hover { color: #ffc09a; border-color: #a65a38; background: #48291c; }
 
 .empty { min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 11px; }
 .mini-log { padding: 7px 16px 11px; }
@@ -163,6 +165,8 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .segmented { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: 3px; background: #15181a; border: 1px solid var(--border); border-radius: 6px; }
 .segmented button { height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .segmented button.active { background: var(--surface-3); color: var(--text); }
+.speed-options button { min-width: 0; padding: 0 8px; white-space: nowrap; }
+.field-note { color: var(--amber); font-size: 9px; font-weight: 500; }
 .toggle-line { display: flex; gap: 12px; align-items: center; cursor: pointer; }
 .toggle-line input { display: none; }
 .toggle { width: 34px; height: 18px; flex: 0 0 34px; background: #3a4248; border-radius: 9px; position: relative; }
@@ -240,7 +244,7 @@ main { min-width: 0; display: flex; flex-direction: column; }
 
 @media (max-width: 1180px) {
     .shell { grid-template-columns: 194px minmax(0, 1fr); }
-    .strategy-list .table-head, .strategy-list .table-row { grid-template-columns: minmax(140px, 1fr) minmax(130px, .8fr) 88px 68px minmax(110px, .8fr) 150px; gap: 9px; padding: 0 11px; }
+    .strategy-list .table-head, .strategy-list .table-row { grid-template-columns: minmax(140px, 1fr) minmax(130px, .8fr) 88px 68px minmax(110px, .8fr) 185px; gap: 9px; padding: 0 11px; }
     .wallet-layout { grid-template-columns: 1fr; }
     .form-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

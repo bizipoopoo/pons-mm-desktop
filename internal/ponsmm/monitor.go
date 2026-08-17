@@ -256,8 +256,9 @@ func (m *Monitor) onTrade(t pons.PoolTrade) {
 			m.lastRetailBuyAt = now
 		} else {
 			m.retailNetTokens.Sub(m.retailNetTokens, t.TokenAmount)
-			if m.retailNetTokens.Sign() < 0 {
+			if m.retailNetTokens.Sign() <= 0 {
 				m.retailNetTokens.SetInt64(0)
+				m.retailLastBuyPx = nil
 			}
 			m.lastRetailSellAt = now
 		}

@@ -44,6 +44,14 @@ New strategies default to the current Pons v2 stack. Existing configurations cre
 
 The v2 direct-launch path does not offer an atomic creator initial buy. Set **Initial buy** to zero; maker accumulation begins after launch confirmation. Custom ERC-20 quote curves are not supported by the desktop engine yet.
 
+## Execution Cadence
+
+Buy and sell rounds each offer four minimum-cadence presets: **Extreme** (100 ms), **Fast** (500 ms), **Slow** (1 second), and **Very slow** (1 minute). Chain confirmation can make the effective interval longer. Buys are sequential by default and can be switched to concurrent execution across every funded maker wallet. Sells are concurrent by default and can be switched to sequential execution.
+
+When a retail buy arrives while the strategy has a high share of circulating tokens, PonsDesk immediately sells no more than the incoming retail token amount, capped at 5% of the strategy position and the configured sell tranche, then enters its price-band logic. A retail sell is always logged; distribution or oscillation returns to accumulation, and a fully exited tracked retail position clears the old price anchor. If maker wallets have no spendable ETH, the strategy reports that it is waiting, refreshes balances every five seconds, and resumes automatically after a top-up.
+
+While a strategy is running, **One-click exit** stops normal strategy decisions and concurrently batch-sells 100% of the token balances held by the treasury and all maker wallets. It always forces concurrent liquidation regardless of the normal sell concurrency setting and requires typing `EXIT` in a dedicated confirmation dialog.
+
 ## Multi-Pair Safety
 
 Each running strategy owns its own Pons client, context, engine, and selected wallet set. PonsDesk rejects a start request when any selected wallet is already reserved by another live strategy. Assign disjoint treasury and maker wallets to every concurrently active pair.
@@ -53,6 +61,15 @@ The vault must remain unlocked while strategies are running. Private keys are co
 ## GMGN Tags
 
 GMGN does not currently expose an official write API for followed-wallet remarks. PonsDesk exports its supported bulk-import JSON through the download button in the strategy row. Import that file once from the GMGN website while logged into your chosen viewer account.
+
+1. Unlock **Wallet vault** in PonsDesk.
+2. Open **Strategies** and click **Export GMGN tags** on the strategy you want to export.
+3. Save the generated `ponsdesk-gmgn-import.json` file.
+4. Sign in to [GMGN wallet tracking](https://gmgn.ai/follow).
+5. Click **批量导入导出** in the upper-right corner, then paste or import the generated JSON.
+6. Review the wallet names and emoji, then confirm the import.
+
+The exported file contains only public wallet addresses, names, and emoji. It never contains private keys or mnemonic phrases. GMGN supports importing up to 2,000 tracked addresses at a time. See the [official GMGN import guide](https://docs.gmgn.ai/cn/dao-ru-dao-chu-guan-zhu-qian-bao) for the current website workflow.
 
 ## Development
 

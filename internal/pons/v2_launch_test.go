@@ -37,6 +37,42 @@ func TestBuildV2Launch(t *testing.T) {
 	}
 }
 
+func TestV2LaunchedFromReceipt(t *testing.T) {
+	token := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	curve := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	deployer := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	pairToken := common.Address{}
+	launchConfigID := big.NewInt(7)
+	graduationThreshold := big.NewInt(4_200_000_000_000_000_000)
+	data, err := factoryABI.Events["TokenLaunched"].Inputs.NonIndexed().Pack(
+		pairToken, launchConfigID, graduationThreshold,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := &types.Receipt{Logs: []*types.Log{{
+		Address: common.HexToAddress(LaunchFactory),
+		Topics: []common.Hash{
+			tokenLaunchedTopic,
+			common.BytesToHash(token.Bytes()),
+			common.BytesToHash(curve.Bytes()),
+			common.BytesToHash(deployer.Bytes()),
+		},
+		Data: data,
+	}}}
+
+	launch, ok := V2LaunchedFromReceipt(receipt)
+	if !ok {
+		t.Fatal("v2 TokenLaunched event did not decode")
+	}
+	if launch.Token != token || launch.Curve != curve || launch.Deployer != deployer || launch.PairToken != pairToken {
+		t.Fatalf("decoded addresses are wrong: %+v", launch)
+	}
+	if launch.LaunchConfigID.Cmp(launchConfigID) != 0 || launch.GraduationThreshold.Cmp(graduationThreshold) != 0 {
+		t.Fatalf("decoded launch economics are wrong: %+v", launch)
+	}
+}
+
 func TestDecodeCurveTrade(t *testing.T) {
 	buyer := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	recipient := common.HexToAddress("0x2222222222222222222222222222222222222222")
