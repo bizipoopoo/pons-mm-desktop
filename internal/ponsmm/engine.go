@@ -224,6 +224,9 @@ func (e *Engine) launchV1(ctx context.Context, dryRun bool) error {
 		FeeWallet: feeWallet,
 	}
 
+	if err := e.ensureLaunchFunds(ctx, value, buyGasLimit); err != nil {
+		return err
+	}
 	e.log.Info("launch preflight ok",
 		"deployer", who.Hex(),
 		"launch_fee_eth", weiToEthStr(fee),
@@ -279,6 +282,29 @@ func (e *Engine) launchV1(ctx context.Context, dryRun bool) error {
 	return nil
 }
 
+// ensureLaunchFunds verifies before a launch that the treasury can cover the
+// transaction value plus the node's worst-case gas reservation (gas limit x
+// suggested fee cap), so underfunding fails preflight with a clear message
+// instead of an "insufficient funds" send error.
+func (e *Engine) ensureLaunchFunds(ctx context.Context, value *big.Int, gasLimit uint64) error {
+	who := e.pool.Treasury.Addr
+	balance, err := e.client.EthBalance(ctx, who)
+	if err != nil {
+		return fmt.Errorf("read deployer balance: %w", err)
+	}
+	_, feeCap, err := e.client.SuggestGas(ctx, e.extraTipWei)
+	if err != nil {
+		return fmt.Errorf("suggest gas: %w", err)
+	}
+	required := new(big.Int).Mul(feeCap, new(big.Int).SetUint64(gasLimit))
+	required.Add(required, value)
+	if balance.Cmp(required) < 0 {
+		return fmt.Errorf("deployer %s holds %s ETH but the launch needs at least %s ETH (%s ETH value + gas reservation for %d gas); top up the treasury wallet",
+			who.Hex(), weiToEthStr(balance), weiToEthStr(required), weiToEthStr(value), gasLimit)
+	}
+	return nil
+}
+
 func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	who := e.pool.Treasury.Addr
 	can, err := e.client.CanLaunchV2(ctx, who)
@@ -331,6 +357,9 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	}
 	if len(exemptions) > 32 {
 		return fmt.Errorf("v2 supports at most 32 additional snipe-tax-exempt maker wallets; got %d", len(exemptions))
+	}
+	if err := e.ensureLaunchFunds(ctx, fee, launchV2GasLimit); err != nil {
+		return err
 	}
 	e.log.Info("v2 launch preflight ok",
 		"deployer", who.Hex(), "launch_fee_eth", weiToEthStr(fee),
