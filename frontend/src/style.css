@@ -55,7 +55,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .dot { width: 7px; height: 7px; background: #cbd5e1; border-radius: 50%; }
 .dot.live { background: var(--green); box-shadow: 0 0 0 3px rgba(16, 185, 129, .16); }
 
-main { min-width: 0; display: flex; flex-direction: column; }
+/* min-height: 0 lets the grid item shrink to the viewport row so .content
+   scrolls; without it tall pages (e.g. Settings) push main past the hidden
+   body overflow and become unreachable. */
+main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .topbar { height: 76px; flex: 0 0 76px; border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); -webkit-app-region: drag; }
 .topbar h1 { font-size: 18px; margin: 0; font-weight: 700; }
 .topbar p { font-size: 11px; color: var(--muted); margin: 5px 0 0; }
