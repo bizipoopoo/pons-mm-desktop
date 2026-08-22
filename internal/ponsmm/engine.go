@@ -93,6 +93,10 @@ type Engine struct {
 
 	fundWaitLogged   bool
 	lastFundsRefresh time.Time
+	// freshLaunch marks a token this engine launched itself: balances are fully
+	// known without chain reads, so Run's startup refreshes need not block the
+	// event loop.
+	freshLaunch bool
 	exitAllRequests  chan chan error
 
 	retailResponseActive bool
@@ -552,6 +556,7 @@ func (e *Engine) bindV2FromLaunch(launched pons.Launch, launchCfg pons.V2LaunchC
 	}
 	e.monitor = NewCurveMonitor(e.client, e.pool, launched.Token, launched.Curve, launchCfg.Supply, e.log)
 	e.launchAt = time.Now()
+	e.freshLaunch = true
 	e.state = Accumulating
 }
 
@@ -613,25 +618,43 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	// The three startup reads are independent; run them concurrently so the
 	// event loop (which acts on retail trades) starts as soon as possible.
-	var ethErr, tokErr error
-	var initWg sync.WaitGroup
-	initWg.Add(2)
-	go func() { defer initWg.Done(); ethErr = e.pool.RefreshETH(ctx) }()
-	go func() { defer initWg.Done(); tokErr = e.pool.RefreshToken(ctx, e.token) }()
-	if err := e.monitor.RefreshReserves(ctx); err != nil {
-		e.log.Warn("initial reserve refresh failed", "err", err)
-	}
-	initWg.Wait()
-	if ethErr != nil {
-		return ethErr
-	}
-	if tokErr != nil {
+	startupReads := func() error {
+		var ethErr, tokErr error
+		var initWg sync.WaitGroup
+		initWg.Add(2)
+		go func() { defer initWg.Done(); ethErr = e.pool.RefreshETH(ctx) }()
+		go func() { defer initWg.Done(); tokErr = e.pool.RefreshToken(ctx, e.token) }()
+		if err := e.monitor.RefreshReserves(ctx); err != nil {
+			e.log.Warn("initial reserve refresh failed", "err", err)
+		}
+		initWg.Wait()
+		if ethErr != nil {
+			return ethErr
+		}
 		return tokErr
 	}
-	e.captureStartBalance()
 	defer e.finalizeStats()
 	e.lastFundsRefresh = time.Now()
-	e.seedMonitorFromBalances(ctx)
+	if e.freshLaunch {
+		// A token this engine just launched has nothing the event loop must
+		// wait for: balances started at zero, the atomic initial buy is already
+		// credited, and every burst buy books itself on confirmation. Blocking
+		// here made the loop queue behind ~20 approval/refresh RPCs while
+		// launch snipers traded — refresh in the background instead and start
+		// reacting immediately.
+		go func() {
+			if err := startupReads(); err != nil {
+				e.log.Warn("background startup refresh failed; continuing on cached balances", "err", err)
+			}
+			e.captureStartBalance()
+		}()
+	} else {
+		if err := startupReads(); err != nil {
+			return err
+		}
+		e.captureStartBalance()
+		e.seedMonitorFromBalances(ctx)
+	}
 
 	// Approval warming must not block the event loop. A sell can be queued behind
 	// an already-submitted approval by nonce, so confirmation is not required on
