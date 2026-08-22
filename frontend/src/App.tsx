@@ -440,22 +440,24 @@ function FundingSettings({config, vaultUnlocked, notify}: {config?: control.Fund
         finally { setBusy(''); }
     };
     return <div className="section-block"><div className="section-heading"><div><h2>Fund routing wallets</h2><p>Fixed once configured. Generated keys are encrypted in the vault; a backup download is mandatory.</p></div></div>
-        {!vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the wallet vault before generating routing wallets.</span></div>}
-        <div className="funding-roles">
-            <FundingRole label="Deposit cold wallet" hint="Receives the money you want to distribute" done={Boolean(config?.depositCold)}
-                detail={config?.depositCold ? config.depositCold.address : 'Not configured'}
-                action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'deposit-cold'} onClick={() => generate('deposit-cold')}><KeyRound size={14}/> Generate</button>}/>
-            <FundingRole label="Deposit relay wallets" hint="10 intermediaries between the cold wallet and batch 1" done={(config?.depositRelays?.length || 0) === 10}
-                detail={(config?.depositRelays?.length || 0) === 10 ? `10 wallets · ${short(config!.depositRelays![0].address)} …` : 'Not configured'}
-                action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'deposit-relays'} onClick={() => generate('deposit-relays')}><KeyRound size={14}/> Generate 10</button>}/>
-            <FundingRole label="Withdraw relay wallets" hint="10 intermediaries that gather funds before the final payout" done={(config?.withdrawRelays?.length || 0) === 10}
-                detail={(config?.withdrawRelays?.length || 0) === 10 ? `10 wallets · ${short(config!.withdrawRelays![0].address)} …` : 'Not configured'}
-                action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'withdraw-relays'} onClick={() => generate('withdraw-relays')}><KeyRound size={14}/> Generate 10</button>}/>
-            <FundingRole label="Withdraw cold wallet" hint="Address only — its key is never stored here" done={Boolean(config?.withdrawCold)}
-                detail={config?.withdrawCold || 'Not configured'}
-                action={!config?.withdrawCold ? <div className="funding-cold-input"><input className="mono" value={coldAddr} onChange={e => setColdAddr(e.target.value)} placeholder="0x..."/><button className="secondary small" disabled={!coldAddr.trim() || busy === 'withdraw-cold'} onClick={saveCold}><Save size={14}/> Save</button></div> : null}/>
+        <div className="funding-settings-body">
+            {!vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the wallet vault before generating routing wallets.</span></div>}
+            <div className="funding-roles">
+                <FundingRole label="Deposit cold wallet" hint="Receives the money you want to distribute" done={Boolean(config?.depositCold)}
+                    detail={config?.depositCold ? config.depositCold.address : 'Not configured'}
+                    action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'deposit-cold'} onClick={() => generate('deposit-cold')}><KeyRound size={14}/> Generate</button>}/>
+                <FundingRole label="Deposit relay wallets" hint="10 intermediaries between the cold wallet and batch 1" done={(config?.depositRelays?.length || 0) === 10}
+                    detail={(config?.depositRelays?.length || 0) === 10 ? `10 wallets · ${short(config!.depositRelays![0].address)} …` : 'Not configured'}
+                    action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'deposit-relays'} onClick={() => generate('deposit-relays')}><KeyRound size={14}/> Generate 10</button>}/>
+                <FundingRole label="Withdraw relay wallets" hint="10 intermediaries that gather funds before the final payout" done={(config?.withdrawRelays?.length || 0) === 10}
+                    detail={(config?.withdrawRelays?.length || 0) === 10 ? `10 wallets · ${short(config!.withdrawRelays![0].address)} …` : 'Not configured'}
+                    action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'withdraw-relays'} onClick={() => generate('withdraw-relays')}><KeyRound size={14}/> Generate 10</button>}/>
+                <FundingRole label="Withdraw cold wallet" hint="Address only — its key is never stored here" done={Boolean(config?.withdrawCold)}
+                    detail={config?.withdrawCold || 'Not configured'}
+                    action={!config?.withdrawCold ? <div className="funding-cold-input"><input className="mono" value={coldAddr} onChange={e => setColdAddr(e.target.value)} placeholder="0x..."/><button className="secondary small" disabled={!coldAddr.trim() || busy === 'withdraw-cold'} onClick={saveCold}><Save size={14}/> Save</button></div> : null}/>
+            </div>
+            {fundingConfigured(config) && <div className="inline-note"><ShieldCheck size={17}/><span>All routing wallets are configured. Distribution and withdrawal tasks are available on the Fund routing page.</span></div>}
         </div>
-        {fundingConfigured(config) && <div className="inline-note"><ShieldCheck size={17}/><span>All routing wallets are configured. Distribution and withdrawal tasks are available on the Fund routing page.</span></div>}
     </div>;
 }
 
