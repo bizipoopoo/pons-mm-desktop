@@ -110,7 +110,7 @@ func TestConfigProtocolCompatibility(t *testing.T) {
 	cfg.DevBuyETH = 0.1
 	cfg.RPCEndpoint = "https://rpc.example"
 	cfg.Token.Name, cfg.Token.Symbol = "Test", "TEST"
-	if err := cfg.Validate(true); err == nil {
-		t.Fatal("v2 launch with atomic dev buy must be rejected")
+	if err := cfg.Validate(true); err != nil {
+		t.Fatalf("v2 launch with atomic dev buy (via launch-and-buy router) must be accepted: %v", err)
 	}
 }

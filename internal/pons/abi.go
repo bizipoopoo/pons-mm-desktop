@@ -20,6 +20,12 @@ const (
 	// FeeEscrow holds claimable protocol/creator balances (unused by the
 	// sniper, kept for reference).
 	FeeEscrow = "0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e"
+	// LaunchAndBuyRouter is the official pons v2 "launch and buy" router: it
+	// creates a launch and executes the creator's first buy inside the same
+	// transaction, so that buy cannot be front-run by anyone watching the
+	// launch. The buy recipient is snipe-tax-exempt automatically.
+	// Documented under Contracts at https://docs.ponsfamily.com/v2.
+	LaunchAndBuyRouter = "0xe33E9E479dF8802cb0866d5d05258bEc4cF62948"
 
 	// RobinhoodChainID is the Robinhood Chain mainnet chain id.
 	RobinhoodChainID = 4663
@@ -78,6 +84,36 @@ const (
 	"name":"launchToken","outputs":[{"name":"token","type":"address"},{"name":"curve","type":"address"}],"stateMutability":"payable","type":"function"}
 ]`
 
+	// routerABIJSON carries the launch-and-buy router's single method. The
+	// TokenParams tuple is byte-identical to the factory's launchToken tuple.
+	routerABIJSON = `[
+	{"inputs":[{"components":[
+		{"name":"name","type":"string"},
+		{"name":"symbol","type":"string"},
+		{"name":"logo","type":"string"},
+		{"name":"description","type":"string"},
+		{"components":[
+			{"name":"twitter","type":"string"},
+			{"name":"telegram","type":"string"},
+			{"name":"discord","type":"string"},
+			{"name":"website","type":"string"},
+			{"name":"farcaster","type":"string"}],
+		"name":"socials","type":"tuple"},
+		{"name":"creatorFeeRecipient","type":"address"},
+		{"name":"creatorTaxBps","type":"uint16"},
+		{"name":"buybackEnabled","type":"bool"},
+		{"name":"expectedEconomics","type":"bytes32"},
+		{"name":"salt","type":"bytes32"}],
+	"name":"params","type":"tuple"},
+		{"name":"launchConfigId","type":"uint256"},
+		{"name":"pairToken","type":"address"},
+		{"name":"quoteIn","type":"uint256"},
+		{"name":"minTokensOut","type":"uint256"},
+		{"name":"recipient","type":"address"},
+		{"name":"snipeTaxExemptions","type":"address[]"}],
+	"name":"launchAndBuy","outputs":[{"name":"token","type":"address"},{"name":"curve","type":"address"},{"name":"tokensOut","type":"uint256"}],"stateMutability":"payable","type":"function"}
+]`
+
 	curveABIJSON = `[
 	{"inputs":[{"name":"quoteIn","type":"uint256"},{"name":"minTokensOut","type":"uint256"},{"name":"recipient","type":"address"}],"name":"buy","outputs":[{"name":"tokensOut","type":"uint256"}],"stateMutability":"payable","type":"function"},
 	{"inputs":[{"name":"tokensIn","type":"uint256"},{"name":"minQuoteOut","type":"uint256"},{"name":"recipient","type":"address"}],"name":"sell","outputs":[{"name":"quoteOut","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
@@ -123,6 +159,7 @@ const (
 
 var (
 	factoryABI = mustABI(factoryABIJSON)
+	routerABI  = mustABI(routerABIJSON)
 	curveABI   = mustABI(curveABIJSON)
 	erc20ABI   = mustABI(erc20ABIJSON)
 

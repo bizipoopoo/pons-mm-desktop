@@ -358,11 +358,21 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	if len(exemptions) > 32 {
 		return fmt.Errorf("v2 supports at most 32 additional snipe-tax-exempt maker wallets; got %d", len(exemptions))
 	}
-	if err := e.ensureLaunchFunds(ctx, fee, launchV2GasLimit); err != nil {
+	// A non-zero initial buy routes the launch through the official
+	// launch-and-buy router: the treasury's first buy executes inside the
+	// launch transaction itself, so no sniper can trade before it.
+	devBuy := ethToWei(e.cfg.DevBuyETH)
+	value := new(big.Int).Add(fee, devBuy)
+	gasLimit := uint64(launchV2GasLimit)
+	if devBuy.Sign() > 0 {
+		gasLimit += buyGasLimit
+	}
+	if err := e.ensureLaunchFunds(ctx, value, gasLimit); err != nil {
 		return err
 	}
 	e.log.Info("v2 launch preflight ok",
 		"deployer", who.Hex(), "launch_fee_eth", weiToEthStr(fee),
+		"atomic_initial_buy_eth", weiToEthStr(devBuy),
 		"supply", launchCfg.Supply.String(),
 		"graduation_threshold_eth", weiToEthStr(launchCfg.GraduationThreshold),
 		"maker_exemptions", len(exemptions))
@@ -374,11 +384,17 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		return err
 	}
 	e.captureStartBalance()
-	pr, err := e.pool.txParams(ctx, e.pool.Treasury, launchV2GasLimit, e.extraTipWei)
+	pr, err := e.pool.txParams(ctx, e.pool.Treasury, gasLimit, e.extraTipWei)
 	if err != nil {
 		return err
 	}
-	tx, err := e.pool.Treasury.Signer.BuildV2Launch(params, e.cfg.LaunchConfigID, pairToken, exemptions, fee, pr)
+	var tx *types.Transaction
+	if devBuy.Sign() > 0 {
+		tx, err = e.pool.Treasury.Signer.BuildV2LaunchAndBuy(params, e.cfg.LaunchConfigID, pairToken,
+			devBuy, big.NewInt(0), who, exemptions, value, pr)
+	} else {
+		tx, err = e.pool.Treasury.Signer.BuildV2Launch(params, e.cfg.LaunchConfigID, pairToken, exemptions, fee, pr)
+	}
 	if err != nil {
 		return fmt.Errorf("build v2 launch: %w", err)
 	}
@@ -405,6 +421,17 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	}
 	e.monitor.SetStartBlock(launched.Block)
 	e.monitor.MarkOurTx(tx.Hash())
+	if devBuy.Sign() > 0 {
+		if tokensOut, ok := pons.V2AtomicBuyFromReceipt(rcpt, launched.Curve, who); ok {
+			e.pool.Treasury.setTokenBalance(tokensOut)
+			e.monitor.RecordOurBuy(devBuy, tokensOut)
+			e.recordBuy(devBuy)
+			e.log.Info("atomic initial buy landed inside the launch transaction",
+				"eth_in", weiToEthStr(devBuy), "tokens", tokensOut.String())
+		} else {
+			e.log.Warn("launch receipt carried no CurveBuy for the treasury; atomic initial buy unaccounted")
+		}
+	}
 	for _, b := range burst {
 		e.monitor.MarkOurTx(b.hash)
 		e.addPendingBuy()

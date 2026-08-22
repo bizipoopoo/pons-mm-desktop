@@ -43,8 +43,10 @@ type Config struct {
 	LaunchConfigID uint64 `yaml:"launch_config_id"`
 	DexID          uint64 `yaml:"dex_id"`
 
-	// DevBuyETH is an optional v1-only atomic initial buy performed inside the
-	// launch transaction (paid on top of the launch fee). v2 requires zero.
+	// DevBuyETH is an optional atomic initial buy performed inside the launch
+	// transaction (paid on top of the launch fee). On v2 it routes the launch
+	// through the official launch-and-buy router so the treasury's first buy
+	// cannot be front-run by launch snipers.
 	DevBuyETH float64 `yaml:"dev_buy_eth"`
 
 	// Accumulation.
@@ -151,9 +153,6 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 	}
 	if c.GasReserveETH < 0 || c.PriorityTipGwei < 0 || c.DevBuyETH < 0 {
 		return fmt.Errorf("ETH and gas values must not be negative")
-	}
-	if requireLaunchMetadata && protocol == ProtocolV2 && c.DevBuyETH != 0 {
-		return fmt.Errorf("v2 launch does not support an atomic initial buy yet; set dev_buy_eth to 0")
 	}
 	return nil
 }

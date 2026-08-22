@@ -54,7 +54,7 @@ New strategies default to the current Pons v2 stack. Existing configurations cre
 | v2 | Bonding curve, then graduation to Uniswap V4 | Launches and market-makes the native-ETH curve; maker wallets are included as opening-tax exemptions. The engine stops safely at graduation and leaves any remaining positions for a future/manual V4 route. |
 | v1 | Direct launch into a locked Uniswap V3 pool | Preserves the existing V3 market-making flow. Launching may require a whitelisted deployer while the v1 public gate is closed. |
 
-The v2 direct-launch path does not offer an atomic creator initial buy. Set **Initial buy** to zero; maker accumulation begins after launch confirmation. Custom ERC-20 quote curves are not supported by the desktop engine yet.
+A non-zero **Initial buy** routes the v2 launch through the official launch-and-buy router (`0xe33E…2948`), which executes the treasury's first buy inside the launch transaction itself — launch snipers cannot trade before it by construction, and the buy is exempt from the opening snipe tax. Maker wallets follow with a concurrent buy burst the moment the launch receipt lands. Custom ERC-20 quote curves are not supported by the desktop engine yet.
 
 ## Execution Cadence
 
