@@ -955,20 +955,27 @@ func (e *Engine) applyDistributionResult(result distributionResult) {
 	}
 }
 
-// clearAllStep liquidates the entire profitable position across all wallets at
-// once. Profit-taking and one-click exit both force the fastest concurrent path.
+// clearAllStep liquidates the entire position across all wallets at once. Both
+// profit-taking and one-click exit take this fastest concurrent path.
+//
+// It re-reads every wallet's token balance from the chain first. The cached
+// balances cannot be trusted here: a buy broadcast just before the exit may
+// land on-chain after its settlement goroutine was cancelled, leaving tokens
+// the cache still reports as zero. Selling off the cache would strand those
+// tokens and, because round P&L is measured purely in ETH, show them as loss.
 func (e *Engine) clearAllStep(ctx context.Context) error {
+	e.refreshTokensForExit(ctx)
 	return e.clearAllStepWithQuote(ctx, e.quoteSellAll(ctx, e.pool.TotalTokens()))
 }
 
 func (e *Engine) clearAllStepWithQuote(ctx context.Context, totalQuote *big.Int) error {
-	e.log.Info("concurrently clearing entire profitable position")
+	e.log.Info("concurrently clearing entire position")
 	if err := e.sellAllFast(ctx, totalQuote); err != nil {
 		return err
 	}
 	e.finishDrainIfEmpty()
 	if e.state != Done {
-		e.log.Info("initial exit batch complete; waiting for pending buys or residual balances",
+		e.log.Info("exit sweep submitted; re-checking on-chain balances next tick",
 			"pending_buys", e.pendingBuyCount(), "remaining_tokens", e.pool.TotalTokens().String())
 	}
 	return nil
@@ -976,7 +983,17 @@ func (e *Engine) clearAllStepWithQuote(ctx context.Context, totalQuote *big.Int)
 
 func (e *Engine) exitAllStep(ctx context.Context) error {
 	e.log.Info("one-click exit: concurrently clearing every wallet position")
+	e.refreshTokensForExit(ctx)
 	return e.clearAllStepWithQuote(ctx, e.quoteSellAll(ctx, e.pool.TotalTokens()))
+}
+
+// refreshTokensForExit reloads on-chain token balances so an exit sweep sells
+// what the wallets actually hold, not a stale cache. Best effort: a refresh
+// failure logs and leaves the cache in place rather than aborting the exit.
+func (e *Engine) refreshTokensForExit(ctx context.Context) {
+	if err := e.pool.RefreshToken(ctx, e.token); err != nil {
+		e.log.Warn("exit balance refresh failed; selling off cached balances", "err", err)
+	}
 }
 
 func (e *Engine) buyFromMaker(ctx, settleCtx context.Context, w *Wallet) {
