@@ -32,6 +32,7 @@ function App() {
     const [editing, setEditing] = useState<control.Strategy | null>(null);
     const [liveTarget, setLiveTarget] = useState<control.Strategy | null>(null);
     const [exitTarget, setExitTarget] = useState<control.Strategy | null>(null);
+    const [resetTarget, setResetTarget] = useState<control.Strategy | null>(null);
     const [busy, setBusy] = useState('');
 
     const notify = (kind: Toast['kind'], text: string) => {
@@ -82,9 +83,8 @@ function App() {
     };
 
     const reset = async (s: control.Strategy) => {
-        if (!window.confirm(`Reset "${s.name}"? The launched token/pool binding is cleared so the next start launches a fresh token with the same configuration. Only do this after every position is sold.`)) return;
         setBusy(`reset:${s.id}`);
-        try { await ResetStrategy(s.id); notify('success', 'Strategy reset; next start will launch a new token'); }
+        try { await ResetStrategy(s.id); notify('success', 'Strategy reset; next start will launch a new token'); setResetTarget(null); }
         catch (e) { notify('error', String(e)); }
         finally { setBusy(''); }
     };
@@ -134,7 +134,7 @@ function App() {
 
             <div className="content">
                 {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget}/>}
-                {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} onReset={reset} notify={notify}/>}
+                {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} onReset={setResetTarget} notify={notify}/>}
                 {page === 'wallets' && <WalletVault state={data.vault} notify={notify}/>}
                 {page === 'logs' && <Logs logs={data.logs || []} strategies={data.strategies || []}/>}
                 {page === 'settings' && <SettingsPage initial={data.settings} notify={notify}/>}
@@ -151,6 +151,10 @@ function App() {
             catch (e) { notify('error', String(e)); }
             finally { setBusy(''); }
         }}/>}
+        {resetTarget && <ConfirmDialog title="Reset strategy" subtitle={resetTarget.name}
+            message="The launched token/pool binding is cleared so the next start launches a fresh token with the same configuration. Only do this after every position is sold; the reset is refused while wallets still hold the token."
+            confirmLabel="Reset" busy={busy === `reset:${resetTarget.id}`}
+            onClose={() => setResetTarget(null)} onConfirm={() => reset(resetTarget)}/>}
         {exitTarget && <ExitDialog strategy={exitTarget} busy={busy === `exit:${exitTarget.id}`} onClose={() => setExitTarget(null)} onConfirm={async () => {
             setBusy(`exit:${exitTarget.id}`);
             try { await ExitStrategy(exitTarget.id, 'EXIT'); notify('success', `${exitTarget.name} exited all token positions`); setExitTarget(null); }
@@ -195,10 +199,13 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, o
     onPreflight: (s: control.Strategy) => void; onReset: (s: control.Strategy) => void; notify: (k: Toast['kind'], t: string) => void;
 }) {
     const [expanded, setExpanded] = useState('');
+    const [deleteTarget, setDeleteTarget] = useState<control.Strategy | null>(null);
+    const [deleting, setDeleting] = useState(false);
     const remove = async (s: control.Strategy) => {
-        if (!window.confirm(`Delete strategy "${s.name}"?`)) return;
-        try { await DeleteStrategy(s.id); notify('success', 'Strategy deleted'); }
+        setDeleting(true);
+        try { await DeleteStrategy(s.id); notify('success', 'Strategy deleted'); setDeleteTarget(null); }
         catch (e) { notify('error', String(e)); }
+        finally { setDeleting(false); }
     };
     const exportGMGN = async (s: control.Strategy) => {
         try { const path = await ExportGMGN(s.id); notify('success', `Exported to ${path}`); }
@@ -225,7 +232,7 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, o
                             <button className="reset-icon" title="Reset: forget the launched token so the next start launches a new one (positions must be fully sold)" disabled={active || busy === `reset:${s.id}`} onClick={() => onReset(s)}><RotateCcw size={16}/></button>
                             <button title="Export GMGN tags" disabled={!data.vault.unlocked} onClick={() => exportGMGN(s)}><Download size={16}/></button>
                             <button title="Edit" disabled={active} onClick={() => onEdit(s)}><Edit3 size={16}/></button>
-                            <button title="Delete" disabled={active} onClick={() => remove(s)}><Trash2 size={16}/></button>
+                            <button title="Delete" disabled={active} onClick={() => setDeleteTarget(s)}><Trash2 size={16}/></button>
                         </div>
                     </div>
                     {open && <StatsPanel stats={job?.stats} state={job?.state}/>}
@@ -233,6 +240,10 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, o
             })}
             {!data.strategies?.length && <Empty text="No strategies configured" action={<button className="secondary" onClick={onAdd}><Plus size={16}/> Create strategy</button>}/>}
         </div>
+        {deleteTarget && <ConfirmDialog title="Delete strategy" subtitle={deleteTarget.name}
+            message="The strategy configuration and its job history are removed. Wallets and their balances are not affected."
+            confirmLabel="Delete" busy={deleting}
+            onClose={() => setDeleteTarget(null)} onConfirm={() => remove(deleteTarget)}/>}
     </section>;
 }
 
@@ -407,6 +418,20 @@ function LiveDialog({strategy, onClose, onConfirm}: {strategy: control.Strategy;
 function ExitDialog({strategy, busy, onClose, onConfirm}: {strategy: control.Strategy; busy: boolean; onClose: () => void; onConfirm: () => void}) {
     const [phrase, setPhrase] = useState('');
     return <Modal title="One-click exit" subtitle={strategy.name} onClose={busy ? () => {} : onClose}><div className="risk-box"><AlertTriangle size={20}/><div><strong>This sells every token balance</strong><p>PonsDesk will stop normal strategy decisions and concurrently batch-sell 100% of the token held by the treasury and all maker wallets. This action overrides the normal sell concurrency setting, pays gas, may require approvals, and cannot be undone.</p></div></div><Field label="Type EXIT to confirm"><input autoFocus disabled={busy} value={phrase} onChange={e => setPhrase(e.target.value.toUpperCase())}/></Field><div className="dialog-footer"><button className="secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="danger" disabled={busy || phrase !== 'EXIT'} onClick={onConfirm}><LogOut size={16}/>{busy ? 'Selling all positions' : 'Exit all positions'}</button></div></Modal>;
+}
+
+// ConfirmDialog replaces window.confirm, which the Wails WebView does not
+// implement (it silently returns false, so the action would never run).
+function ConfirmDialog({title, subtitle, message, confirmLabel, busy, onClose, onConfirm}: {
+    title: string; subtitle?: string; message: string; confirmLabel: string; busy: boolean; onClose: () => void; onConfirm: () => void;
+}) {
+    return <Modal title={title} subtitle={subtitle} onClose={busy ? () => {} : onClose}>
+        <div className="risk-box"><AlertTriangle size={20}/><div><p>{message}</p></div></div>
+        <div className="dialog-footer">
+            <button className="secondary" disabled={busy} onClick={onClose}>Cancel</button>
+            <button className="danger" disabled={busy} onClick={onConfirm}>{busy ? 'Working' : confirmLabel}</button>
+        </div>
+    </Modal>;
 }
 
 function Modal({title, subtitle, onClose, children, wide = false}: {title: string; subtitle?: string; onClose: () => void; children: React.ReactNode; wide?: boolean}) {
