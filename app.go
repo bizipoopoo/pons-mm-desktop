@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -37,8 +38,27 @@ func (a *App) startup(ctx context.Context) {
 		runtime.EventsEmit(ctx, name, value)
 	})
 	// Startup initialization: verify the gate wallet balance on the public
-	// Robinhood node before any strategy may go live.
-	go a.service.RunInitCheck()
+	// Robinhood node. The process terminates when the gate does not pass.
+	go a.enforceInitGate()
+}
+
+// enforceInitGate runs the startup initialization check and kills the process
+// when it does not pass. A definitive underfunded balance exits immediately;
+// an unreachable node is retried a few times, then the gate fails closed.
+func (a *App) enforceInitGate() {
+	const attempts = 5
+	for attempt := 1; ; attempt++ {
+		status := a.service.RunInitCheck()
+		if status.OK {
+			return
+		}
+		// BalanceETH is only set when the balance read itself succeeded, so a
+		// non-empty value means the wallet is genuinely below the threshold.
+		if status.BalanceETH != "" || attempt >= attempts {
+			os.Exit(1)
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 func (a *App) shutdown(context.Context) { a.service.Shutdown() }
