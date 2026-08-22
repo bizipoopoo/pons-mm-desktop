@@ -1,14 +1,16 @@
 import {useEffect, useMemo, useState} from 'react';
 import {
-    Activity, AlertTriangle, Check, ChevronDown, ChevronUp, CircleDollarSign,
+    Activity, AlertTriangle, BarChart3, Check, ChevronDown, ChevronUp, CircleDollarSign,
     Copy, Download, Edit3, Eye, EyeOff, FileCheck2, Gauge, KeyRound, LayoutDashboard,
-    ListFilter, Lock, LockOpen, LogOut, Plus, Radio, RefreshCw, Save, Settings as SettingsIcon,
-    ShieldCheck, Square, SquareTerminal, StopCircle, Trash2, Upload, WalletCards, X,
+    ListFilter, Lock, LockOpen, LogOut, Plus, Radio, RefreshCw, RotateCcw, Save,
+    Settings as SettingsIcon, ShieldCheck, Sparkles, Square, SquareTerminal, StopCircle,
+    Trash2, Upload, WalletCards, X,
 } from 'lucide-react';
 import {
-    Bootstrap, CreateVault, DeleteStrategy, ExitStrategy, ExportGMGN, GenerateMnemonic,
-    ImportMnemonic, ImportPrivateKeys, LockVault, NewStrategy, PreflightStrategy,
-    SaveSettings, SaveStrategy, StartStrategy, StopStrategy, UnlockVault,
+    Bootstrap, CreateVault, DeleteStrategy, ExitStrategy, ExportGMGN, FetchLatestLaunch,
+    GenerateMnemonic, ImportMnemonic, ImportPrivateKeys, LockVault, NewStrategy,
+    PreflightStrategy, ResetStrategy, RunInitCheck, SaveSettings, SaveStrategy,
+    StartStrategy, StopStrategy, UnlockVault,
 } from '../wailsjs/go/main/App';
 import {control, vault} from '../wailsjs/go/models';
 import {EventsOn} from '../wailsjs/runtime/runtime';
@@ -46,10 +48,12 @@ function App() {
         reload();
         const unsubscribers = [
             EventsOn('job-updated', (job: control.JobStatus) => setData(prev => prev ? ({...prev, jobs: upsert(prev.jobs || [], job, 'strategyId')}) as control.Bootstrap : prev)),
+            EventsOn('job-deleted', (id: string) => setData(prev => prev ? ({...prev, jobs: (prev.jobs || []).filter(j => j.strategyId !== id)}) as control.Bootstrap : prev)),
             EventsOn('strategy-updated', (strategy: control.Strategy) => setData(prev => prev ? ({...prev, strategies: upsert(prev.strategies || [], strategy, 'id')}) as control.Bootstrap : prev)),
             EventsOn('strategy-deleted', (id: string) => setData(prev => prev ? ({...prev, strategies: (prev.strategies || []).filter(s => s.id !== id)}) as control.Bootstrap : prev)),
             EventsOn('strategy-log', (entry: control.LogEntry) => setData(prev => prev ? ({...prev, logs: [...(prev.logs || []), entry].slice(-800)}) as control.Bootstrap : prev)),
             EventsOn('vault-updated', (state: control.VaultState) => setData(prev => prev ? ({...prev, vault: state}) as control.Bootstrap : prev)),
+            EventsOn('init-updated', (init: control.InitStatus) => setData(prev => prev ? ({...prev, init}) as control.Bootstrap : prev)),
             EventsOn('config-updated', reload),
         ];
         return () => unsubscribers.forEach(unsub => unsub());
@@ -77,6 +81,21 @@ function App() {
         finally { setBusy(''); }
     };
 
+    const reset = async (s: control.Strategy) => {
+        if (!window.confirm(`Reset "${s.name}"? The launched token/pool binding is cleared so the next start launches a fresh token with the same configuration. Only do this after every position is sold.`)) return;
+        setBusy(`reset:${s.id}`);
+        try { await ResetStrategy(s.id); notify('success', 'Strategy reset; next start will launch a new token'); }
+        catch (e) { notify('error', String(e)); }
+        finally { setBusy(''); }
+    };
+
+    const recheckInit = async () => {
+        setBusy('init');
+        try { const init = await RunInitCheck(); setData(prev => prev ? ({...prev, init}) as control.Bootstrap : prev); notify(init.ok ? 'success' : 'error', init.message); }
+        catch (e) { notify('error', String(e)); }
+        finally { setBusy(''); }
+    };
+
     if (!data) return <div className="boot"><Activity className="spin"/> Loading PonsDesk</div>;
 
     const nav: {id: Page; label: string; icon: typeof Activity}[] = [
@@ -89,7 +108,7 @@ function App() {
 
     return <div className="shell">
         <aside className="sidebar">
-            <div className="brand"><div className="brand-mark"><Activity size={20}/></div><div><strong>PonsDesk</strong><span>Robinhood Chain</span></div></div>
+            <div className="brand"><div className="brand-mark"><BrandMark size={22}/></div><div><strong>PonsDesk</strong><span>Robinhood Chain</span></div></div>
             <nav>{nav.map(item => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><item.icon size={18}/><span>{item.label}</span></button>)}</nav>
             <div className="sidebar-status">
                 <div><span className={`dot ${activeCount ? 'live' : ''}`}/><span>{activeCount} live strategies</span></div>
@@ -100,6 +119,12 @@ function App() {
             <header className="topbar">
                 <div><h1>{nav.find(n => n.id === page)?.label}</h1><p>{pageSubtitle(page)}</p></div>
                 <div className="top-actions">
+                    <button className={`init-chip ${!data.init?.checked ? 'pending' : data.init.ok ? 'ok' : 'failed'}`}
+                        title={data.init?.message || 'Startup initialization is running'}
+                        disabled={busy === 'init'} onClick={recheckInit}>
+                        {!data.init?.checked ? <Activity size={15} className="spin"/> : data.init.ok ? <ShieldCheck size={15}/> : <AlertTriangle size={15}/>}
+                        {!data.init?.checked ? 'Initializing' : data.init.ok ? 'Init OK' : 'Init failed'}
+                    </button>
                     <button className="icon-button" title="Refresh" onClick={reload}><RefreshCw size={17}/></button>
                     <button className={`vault-chip ${data.vault.unlocked ? 'unlocked' : ''}`} onClick={() => setPage('wallets')}>
                         {data.vault.unlocked ? <LockOpen size={16}/> : <Lock size={16}/>} {data.vault.unlocked ? `${data.vault.wallets?.length || 0} wallets` : 'Vault locked'}
@@ -109,7 +134,7 @@ function App() {
 
             <div className="content">
                 {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget}/>}
-                {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} notify={notify}/>}
+                {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} onReset={reset} notify={notify}/>}
                 {page === 'wallets' && <WalletVault state={data.vault} notify={notify}/>}
                 {page === 'logs' && <Logs logs={data.logs || []} strategies={data.strategies || []}/>}
                 {page === 'settings' && <SettingsPage initial={data.settings} notify={notify}/>}
@@ -158,17 +183,18 @@ function Overview({data, jobs, onNavigate, onEdit, onStart, onStop, onExit}: {
                 <div className="mini-log">{(data.logs || []).slice(-7).reverse().map((log, i) => <div key={`${log.at}-${i}`}><time>{new Date(log.at).toLocaleTimeString()}</time><span className={log.level}>{log.level}</span><p>{log.message}</p></div>)}{!data.logs?.length && <Empty text="No engine activity yet"/>}</div>
             </div>
             <div className="section-block compact"><div className="section-heading"><div><h2>Readiness</h2><p>Required local and network state.</p></div></div>
-                <div className="checklist"><CheckRow ok={Boolean(data.settings.rpcEndpoint)} label="Robinhood RPC configured"/><CheckRow ok={data.vault.unlocked} label="Wallet vault unlocked"/><CheckRow ok={(data.strategies?.length || 0) > 0} label="At least one strategy saved"/><CheckRow ok={(data.vault.wallets?.length || 0) > 1} label="Maker wallets available"/></div>
+                <div className="checklist"><CheckRow ok={Boolean(data.init?.ok)} label={data.init?.checked ? (data.init.ok ? 'Startup initialization passed' : 'Startup initialization failed') : 'Startup initialization running'}/><CheckRow ok={Boolean(data.settings.rpcEndpoint)} label="Robinhood RPC configured"/><CheckRow ok={data.vault.unlocked} label="Wallet vault unlocked"/><CheckRow ok={(data.strategies?.length || 0) > 0} label="At least one strategy saved"/><CheckRow ok={(data.vault.wallets?.length || 0) > 1} label="Maker wallets available"/></div>
             </div>
         </section>
     </>;
 }
 
-function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, onPreflight, notify}: {
+function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, onPreflight, onReset, notify}: {
     data: control.Bootstrap; jobs: Map<string, control.JobStatus>; busy: string; onAdd: () => void;
     onEdit: (s: control.Strategy) => void; onStart: (s: control.Strategy) => void; onStop: (id: string) => void; onExit: (s: control.Strategy) => void;
-    onPreflight: (s: control.Strategy) => void; notify: (k: Toast['kind'], t: string) => void;
+    onPreflight: (s: control.Strategy) => void; onReset: (s: control.Strategy) => void; notify: (k: Toast['kind'], t: string) => void;
 }) {
+    const [expanded, setExpanded] = useState('');
     const remove = async (s: control.Strategy) => {
         if (!window.confirm(`Delete strategy "${s.name}"?`)) return;
         try { await DeleteStrategy(s.id); notify('success', 'Strategy deleted'); }
@@ -184,24 +210,58 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, o
             <div className="table-head"><span>Name</span><span>Pair</span><span>Wallets</span><span>Mode</span><span>Status</span><span>Actions</span></div>
             {(data.strategies || []).map(s => {
                 const job = jobs.get(s.id); const active = isActive(job?.state);
-                return <div className="table-row" key={s.id}>
-                    <div className="name-cell"><span className="pair-icon">{(s.token?.symbol || s.name || '?').slice(0, 2).toUpperCase()}</span><div><strong>{s.name}</strong><small>{s.token?.symbol || 'Unlabelled token'}</small></div></div>
-                    <div className="mono-cell"><strong>{short(s.tokenAddress)}</strong><small>{short(s.poolAddress)}</small></div>
-                    <div><strong>{s.walletIds?.length || 0}</strong><small>1 treasury + {Math.max(0, (s.walletIds?.length || 0) - 1)} makers</small></div>
-                    <div><span className="mode-tag">{(s.protocol || 'v1').toUpperCase()} · {s.mode === 'launch' ? 'Launch' : 'Existing'}</span></div>
-                    <Status state={job?.state} message={job?.message}/>
-                    <div className="row-actions">
-                        <button title="Preflight" disabled={active || busy === `preflight:${s.id}`} onClick={() => onPreflight(s)}><FileCheck2 size={16}/></button>
-                        {active ? <><button className="danger-icon" title="Stop without selling" disabled={job?.state === 'exiting'} onClick={() => onStop(s.id)}><StopCircle size={16}/></button>{job?.state === 'running' && <button className="exit-icon" title="One-click exit: sell all" onClick={() => onExit(s)}><LogOut size={16}/></button>}</> : <button className="start-icon" title="Start live" onClick={() => onStart(s)}><Activity size={16}/></button>}
-                        <button title="Export GMGN tags" disabled={!data.vault.unlocked} onClick={() => exportGMGN(s)}><Download size={16}/></button>
-                        <button title="Edit" disabled={active} onClick={() => onEdit(s)}><Edit3 size={16}/></button>
-                        <button title="Delete" disabled={active} onClick={() => remove(s)}><Trash2 size={16}/></button>
+                const open = expanded === s.id;
+                return <div key={s.id} className={`row-group ${open ? 'open' : ''}`}>
+                    <div className="table-row">
+                        <div className="name-cell"><span className="pair-icon">{(s.token?.symbol || s.name || '?').slice(0, 2).toUpperCase()}</span><div><strong>{s.name}</strong><small>{s.token?.symbol || 'Unlabelled token'}</small></div></div>
+                        <div className="mono-cell"><strong>{short(s.tokenAddress)}</strong><small>{short(s.poolAddress)}</small></div>
+                        <div><strong>{s.walletIds?.length || 0}</strong><small>1 treasury + {Math.max(0, (s.walletIds?.length || 0) - 1)} makers</small></div>
+                        <div><span className="mode-tag">{(s.protocol || 'v1').toUpperCase()} · {s.mode === 'launch' ? 'Launch' : 'Existing'}</span></div>
+                        <Status state={job?.state} message={job?.message}/>
+                        <div className="row-actions">
+                            <button className={open ? 'stats-open' : ''} title="Execution stats" onClick={() => setExpanded(open ? '' : s.id)}><BarChart3 size={16}/></button>
+                            <button title="Preflight" disabled={active || busy === `preflight:${s.id}`} onClick={() => onPreflight(s)}><FileCheck2 size={16}/></button>
+                            {active ? <><button className="danger-icon" title="Stop without selling" disabled={job?.state === 'exiting'} onClick={() => onStop(s.id)}><StopCircle size={16}/></button>{job?.state === 'running' && <button className="exit-icon" title="One-click exit: sell all" onClick={() => onExit(s)}><LogOut size={16}/></button>}</> : <button className="start-icon" title="Start live" onClick={() => onStart(s)}><Activity size={16}/></button>}
+                            <button className="reset-icon" title="Reset: forget the launched token so the next start launches a new one (positions must be fully sold)" disabled={active || busy === `reset:${s.id}`} onClick={() => onReset(s)}><RotateCcw size={16}/></button>
+                            <button title="Export GMGN tags" disabled={!data.vault.unlocked} onClick={() => exportGMGN(s)}><Download size={16}/></button>
+                            <button title="Edit" disabled={active} onClick={() => onEdit(s)}><Edit3 size={16}/></button>
+                            <button title="Delete" disabled={active} onClick={() => remove(s)}><Trash2 size={16}/></button>
+                        </div>
                     </div>
+                    {open && <StatsPanel stats={job?.stats} state={job?.state}/>}
                 </div>;
             })}
             {!data.strategies?.length && <Empty text="No strategies configured" action={<button className="secondary" onClick={onAdd}><Plus size={16}/> Create strategy</button>}/>}
         </div>
     </section>;
+}
+
+function StatsPanel({stats, state}: {stats?: control.JobStats; state?: string}) {
+    if (!stats) return <div className="stats-panel"><Empty text="No execution stats yet — they appear once the strategy runs"/></div>;
+    const profit = stats.profit ? Number(stats.profit) : null;
+    return <div className="stats-panel">
+        <div className="stats-grid">
+            <StatCell label="Buys" value={String(stats.buyCount ?? 0)} hint="confirmed buy transactions"/>
+            <StatCell label="Sells" value={String(stats.sellCount ?? 0)} hint="confirmed sell transactions"/>
+            <StatCell label="ETH in" value={`${trimNum(stats.ethSpent)} ETH`} hint="ETH paid into buys"/>
+            <StatCell label="Tokens sold" value={trimNum(stats.tokensSold)} hint={`received ${trimNum(stats.ethReceived)} ETH`}/>
+            <StatCell label="Total cost" value={`${trimNum(stats.totalCost)} ETH`} hint="gas + tips + launch fee"/>
+            <StatCell label="Round P&L" tone={profit == null ? '' : profit >= 0 ? 'pos' : 'neg'}
+                value={profit == null ? (isActive(state) ? 'Running…' : '—') : `${profit >= 0 ? '+' : ''}${trimNum(stats.profit)} ETH`}
+                hint={stats.startBalance ? `start ${trimNum(stats.startBalance)}${stats.endBalance ? ` → end ${trimNum(stats.endBalance)}` : ''} ETH` : 'balance snapshot at start vs finish'}/>
+        </div>
+    </div>;
+}
+
+function StatCell({label, value, hint, tone = ''}: {label: string; value: string; hint?: string; tone?: string}) {
+    return <div className={`stat-cell ${tone}`}><small>{label}</small><strong>{value}</strong>{hint && <span>{hint}</span>}</div>;
+}
+
+function trimNum(v?: string) {
+    if (!v) return '0';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return v;
+    return n.toLocaleString(undefined, {maximumFractionDigits: 6});
 }
 
 function StrategyTable({strategies, jobs, onEdit, onStart, onStop, onExit}: {
@@ -225,14 +285,36 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
     const [draft, setDraft] = useState<any>(() => JSON.parse(JSON.stringify(strategy)));
     const [tab, setTab] = useState<'pair' | 'wallets' | 'execution'>('pair');
     const [saving, setSaving] = useState(false);
+    const [fetching, setFetching] = useState(false);
     const set = (key: string, value: any) => setDraft((d: any) => ({...d, [key]: value}));
     const setToken = (key: string, value: any) => setDraft((d: any) => ({...d, token: {...(d.token || {}), [key]: value}}));
     const setSocial = (key: string, value: string) => setDraft((d: any) => ({...d, token: {...(d.token || {}), socials: {...(d.token?.socials || {}), [key]: value}}}));
     const selected: string[] = draft.walletIds || [];
     const toggleWallet = (id: string) => set('walletIds', selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
+    const selectAllWallets = () => set('walletIds', [...selected, ...wallets.filter(w => !selected.includes(w.id)).map(w => w.id)]);
     const moveWallet = (index: number, direction: -1 | 1) => {
         const next = [...selected]; const target = index + direction; if (target < 0 || target >= next.length) return;
         [next[index], next[target]] = [next[target], next[index]]; set('walletIds', next);
+    };
+    const prefillFromLatest = async () => {
+        setFetching(true);
+        try {
+            const latest = await FetchLatestLaunch();
+            setDraft((d: any) => ({...d, token: {
+                ...(d.token || {}),
+                name: latest.name || d.token?.name || '',
+                symbol: latest.symbol || d.token?.symbol || '',
+                logo: latest.logo || '',
+                description: latest.description || '',
+                socials: {
+                    twitter: latest.socials?.twitter || '', telegram: latest.socials?.telegram || '',
+                    discord: latest.socials?.discord || '', website: latest.socials?.website || '',
+                    farcaster: latest.socials?.farcaster || '',
+                },
+            }}));
+            notify('success', `Prefilled from the latest launch: ${latest.name} (${latest.symbol})`);
+        } catch (e) { notify('error', String(e)); }
+        finally { setFetching(false); }
     };
     const save = async () => {
         setSaving(true);
@@ -248,6 +330,7 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
                 <Field label="Pons protocol"><div className="segmented"><button className={draft.protocol === 'v2' ? 'active' : ''} onClick={() => { set('protocol', 'v2'); set('devBuyEth', 0); }}>v2 bonding curve</button><button className={(draft.protocol || 'v1') === 'v1' ? 'active' : ''} onClick={() => set('protocol', 'v1')}>v1 · V3 pool</button></div></Field>
                 <div className="inline-note"><Gauge size={17}/><span>{draft.protocol === 'v2' ? 'v2 is the current launch stack. It trades on the bonding curve and stops safely when the token graduates to Uniswap v4.' : 'v1 launches directly into a Uniswap v3 pool and may require a whitelisted deployer while its public gate is closed.'}</span></div>
                 {draft.mode === 'existing' ? <div className="form-grid two"><Field label="Token address"><input className="mono" value={draft.tokenAddress || ''} onChange={e => set('tokenAddress', e.target.value)} placeholder="0x..."/></Field><Field label={draft.protocol === 'v2' ? 'Bonding curve address' : 'V3 pool address'}><input className="mono" value={draft.poolAddress || ''} onChange={e => set('poolAddress', e.target.value)} placeholder="0x..."/></Field></div> : <>
+                    <button className="ghost-command" disabled={fetching} onClick={prefillFromLatest}><Sparkles size={15}/>{fetching ? 'Fetching the latest launch…' : 'Prefill from the latest launched token (name, logo, description)'}</button>
                     <div className="form-grid two"><Field label="Token name"><input value={draft.token?.name || ''} onChange={e => setToken('name', e.target.value)}/></Field><Field label="Symbol"><input value={draft.token?.symbol || ''} onChange={e => setToken('symbol', e.target.value.toUpperCase())}/></Field></div>
                     <Field label="Logo URL"><input value={draft.token?.logo || ''} onChange={e => setToken('logo', e.target.value)} placeholder="https://.../logo.png"/></Field>
                     <Field label="Description"><textarea rows={3} value={draft.token?.description || ''} onChange={e => setToken('description', e.target.value)}/></Field>
@@ -256,7 +339,10 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
                 </>}
             </div>}
             {tab === 'wallets' && <div className="wallet-assignment">
-                <div className="assignment-header"><div><strong>Execution order</strong><p>The first wallet is treasury/deployer; remaining wallets are makers.</p></div></div>
+                <div className="assignment-header"><div><strong>Execution order</strong><p>The first wallet is treasury/deployer; remaining wallets are makers.</p></div><div className="assignment-actions">
+                    <button className="secondary small" disabled={!wallets.length || wallets.every(w => selected.includes(w.id))} onClick={selectAllWallets}><Check size={14}/> Select all</button>
+                    <button className="secondary small" disabled={!selected.length} onClick={() => set('walletIds', [])}><X size={14}/> Clear</button>
+                </div></div>
                 {!wallets.length && <Empty text="Unlock the vault and import wallets first"/>}
                 {selected.map((id, index) => { const w = wallets.find(item => item.id === id); if (!w) return null; return <div className="assigned-wallet" key={id}><span className="role-index">{index + 1}</span><div><strong>{w.label}</strong><small className="mono">{w.address}</small></div><span className={`role-tag ${index === 0 ? 'treasury' : ''}`}>{index === 0 ? 'Treasury' : 'Maker'}</span><button title="Move up" disabled={index === 0} onClick={() => moveWallet(index, -1)}><ChevronUp size={15}/></button><button title="Move down" disabled={index === selected.length - 1} onClick={() => moveWallet(index, 1)}><ChevronDown size={15}/></button><button title="Remove" onClick={() => toggleWallet(id)}><X size={15}/></button></div>; })}
                 <div className="available-wallets"><strong>Available wallets</strong>{wallets.filter(w => !selected.includes(w.id)).map(w => <button key={w.id} onClick={() => toggleWallet(w.id)}><Plus size={15}/><span>{w.label}</span><small className="mono">{short(w.address)}</small></button>)}</div>
@@ -265,9 +351,10 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
                 <SpeedField label="Buy speed" value={draft.accumulateIntervalMs} onChange={v => set('accumulateIntervalMs', v)}/>
                 <label className="toggle-line"><input type="checkbox" checked={Boolean(draft.concurrentBuys)} onChange={e => set('concurrentBuys', e.target.checked)}/><span className="toggle"/><div><strong>Concurrent buys</strong><small>Submit one buy from every funded maker in the same round.</small></div></label>
                 <SpeedField label="Sell speed" value={draft.sellIntervalMs} onChange={v => set('sellIntervalMs', v)}/>
-                <label className="toggle-line"><input type="checkbox" checked={!Boolean(draft.sequentialSells)} onChange={e => set('sequentialSells', !e.target.checked)}/><span className="toggle"/><div><strong>Concurrent sells</strong><small>Enabled by default; sell each wallet's tranche in parallel.</small></div></label>
+                <label className="toggle-line"><input type="checkbox" checked={!Boolean(draft.sequentialSells)} onChange={e => set('sequentialSells', !e.target.checked)}/><span className="toggle"/><div><strong>Concurrent sells</strong><small>Enabled by default; clear the wallets in each batch in parallel.</small></div></label>
                 <div className="inline-note"><Gauge size={17}/><span>Speed is the minimum interval between rounds. Network confirmation can make the effective interval longer.</span></div>
-                <div className="form-grid three"><NumberField label="Buy fraction" value={draft.buyFraction} step={0.01} min={0.01} max={1} onChange={v => set('buyFraction', v)}/><NumberField label="Chip target" value={draft.chipTarget} step={0.05} min={0.05} max={1} onChange={v => set('chipTarget', v)}/><NumberField label="High hold threshold" value={draft.highHold} step={0.05} min={0.05} max={1} onChange={v => set('highHold', v)}/><NumberField label="Oscillation band" value={draft.oscillationBand} step={0.01} min={0.01} max={0.99} onChange={v => set('oscillationBand', v)}/><NumberField label="Sell tranche" value={draft.sellTranche} step={0.05} min={0.05} max={1} onChange={v => set('sellTranche', v)}/><NumberField label="Slippage (bps)" value={draft.slippageBps} step={50} min={0} max={9999} onChange={v => set('slippageBps', v)}/><NumberField label="Priority tip (gwei)" value={draft.priorityTipGwei} step={0.1} min={0} onChange={v => set('priorityTipGwei', v)}/><NumberField label="Gas reserve (ETH)" value={draft.gasReserveEth} step={0.001} min={0} onChange={v => set('gasReserveEth', v)}/></div>
+                <div className="inline-note"><Gauge size={17}/><span>Simplified strategy: every maker buys once. On an outside buy, if the full-exit quote covers all costs (buys + gas + tips + launch fee) with profit, everything is sold concurrently at once; otherwise wallets are cleared in batches of 4-6. If the buyer sells, pumping resumes; if everything is sold first, the strategy stops.</span></div>
+                <div className="form-grid three"><NumberField label="Buy fraction" value={draft.buyFraction} step={0.01} min={0.01} max={1} onChange={v => set('buyFraction', v)}/><NumberField label="Chip target · total supply" value={draft.chipTarget} step={0.05} min={0.05} max={1} onChange={v => set('chipTarget', v)}/><NumberField label="Buy slippage (bps)" value={draft.slippageBps} step={50} min={0} max={9999} onChange={v => set('slippageBps', v)}/><NumberField label="Priority tip (gwei)" value={draft.priorityTipGwei} step={0.1} min={0} onChange={v => set('priorityTipGwei', v)}/><NumberField label="Gas reserve (ETH)" value={draft.gasReserveEth} step={0.001} min={0} onChange={v => set('gasReserveEth', v)}/></div>
                 <label className="toggle-line"><input type="checkbox" checked={Boolean(draft.graduate)} onChange={e => set('graduate', e.target.checked)}/><span className="toggle"/><div><strong>Continue until graduation threshold</strong><small>Accumulate until paired principal reaches the configured launch threshold.</small></div></label>
             </div>}
         </div>
@@ -324,6 +411,17 @@ function ExitDialog({strategy, busy, onClose, onConfirm}: {strategy: control.Str
 
 function Modal({title, subtitle, onClose, children, wide = false}: {title: string; subtitle?: string; onClose: () => void; children: React.ReactNode; wide?: boolean}) {
     return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><div className={`modal ${wide ? 'wide' : ''}`}><div className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" title="Close" onClick={onClose}><X size={18}/></button></div>{children}</div></div>;
+}
+
+// BrandMark mirrors build/appicon-source.svg: a bridge (pons) over rising bars.
+function BrandMark({size = 22}: {size?: number}) {
+    return <svg width={size} height={size} viewBox="0 0 1024 1024" fill="none" aria-hidden="true">
+        <path d="M212 520 C 300 280 724 280 812 520" stroke="#FFFFFF" strokeWidth="78" strokeLinecap="round"/>
+        <rect x="272" y="640" width="124" height="168" rx="62" fill="#FFFFFF" opacity="0.5"/>
+        <rect x="450" y="576" width="124" height="232" rx="62" fill="#FFFFFF" opacity="0.75"/>
+        <rect x="628" y="512" width="124" height="296" rx="62" fill="#FFFFFF"/>
+        <circle cx="744" cy="204" r="52" fill="#B7F5DE"/>
+    </svg>;
 }
 
 function Metric({icon: Icon, label, value, tone}: {icon: typeof Activity; label: string; value: string; tone: string}) { return <div className="metric"><span className={`metric-icon ${tone}`}><Icon size={19}/></span><div><small>{label}</small><strong>{value}</strong></div></div>; }

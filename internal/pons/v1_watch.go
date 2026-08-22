@@ -160,7 +160,32 @@ type PoolTrade struct {
 	TokenAmount *big.Int
 	WethAmount  *big.Int
 	Block       uint64
+	LogIndex    uint
 	TxHash      common.Hash
+}
+
+// FilterPoolTrades returns decoded pool swaps in an inclusive block range.
+// It complements the live subscription so launch-block swaps cannot be missed.
+func (c *Client) FilterPoolTrades(ctx context.Context, pool common.Address, tokenIsToken0 bool, fromBlock, toBlock uint64) ([]PoolTrade, error) {
+	if toBlock < fromBlock {
+		return nil, nil
+	}
+	logs, err := c.eth.FilterLogs(ctx, ethereum.FilterQuery{
+		Addresses: []common.Address{pool},
+		Topics:    [][]common.Hash{{v1SwapTopic}},
+		FromBlock: new(big.Int).SetUint64(fromBlock),
+		ToBlock:   new(big.Int).SetUint64(toBlock),
+	})
+	if err != nil {
+		return nil, err
+	}
+	trades := make([]PoolTrade, 0, len(logs))
+	for _, lg := range logs {
+		if trade, ok := decodePoolTrade(lg, tokenIsToken0); ok {
+			trades = append(trades, trade)
+		}
+	}
+	return trades, nil
 }
 
 // WatchPoolTrades subscribes to a pool's Swap logs and delivers each one decoded
@@ -235,8 +260,27 @@ func decodePoolTrade(lg types.Log, tokenIsToken0 bool) (PoolTrade, bool) {
 		TokenAmount: new(big.Int).Abs(tokenAmt),
 		WethAmount:  new(big.Int).Abs(wethAmt),
 		Block:       lg.BlockNumber,
+		LogIndex:    lg.Index,
 		TxHash:      lg.TxHash,
 	}, true
+}
+
+// PoolTradesFromReceipt returns every v1 pool swap emitted by a confirmed
+// transaction. It is the receipt-safe counterpart of the live subscription.
+func PoolTradesFromReceipt(rcpt *types.Receipt, pool common.Address, tokenIsToken0 bool) []PoolTrade {
+	if rcpt == nil {
+		return nil
+	}
+	var trades []PoolTrade
+	for _, lg := range rcpt.Logs {
+		if lg.Address != pool {
+			continue
+		}
+		if trade, ok := decodePoolTrade(*lg, tokenIsToken0); ok {
+			trades = append(trades, trade)
+		}
+	}
+	return trades
 }
 
 // WatchPoolSwaps subscribes to a single V3 pool's Swap logs so the v1 exit

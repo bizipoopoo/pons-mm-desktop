@@ -59,11 +59,8 @@ type Strategy struct {
 	ConcurrentBuys       bool      `json:"concurrentBuys"`
 	ChipTarget           float64   `json:"chipTarget"`
 	Graduate             bool      `json:"graduate"`
-	HighHold             float64   `json:"highHold"`
-	OscillationBand      float64   `json:"oscillationBand"`
 	SellIntervalMS       int64     `json:"sellIntervalMs"`
 	SequentialSells      bool      `json:"sequentialSells"`
-	SellTranche          float64   `json:"sellTranche"`
 	SlippageBps          int64     `json:"slippageBps"`
 	PriorityTipGwei      float64   `json:"priorityTipGwei"`
 	GasReserveETH        float64   `json:"gasReserveEth"`
@@ -78,15 +75,12 @@ func NewStrategy() Strategy {
 		Protocol:             ponsmm.ProtocolV2,
 		Enabled:              true,
 		BuyFraction:          0.99,
-		AccumulateIntervalMS: 1000,
-		ConcurrentBuys:       false,
+		AccumulateIntervalMS: 100,
+		ConcurrentBuys:       true,
 		ChipTarget:           0.9,
 		Graduate:             true,
-		HighHold:             0.60,
-		OscillationBand:      0.20,
 		SellIntervalMS:       1000,
 		SequentialSells:      false,
-		SellTranche:          0.25,
 		SlippageBps:          1500,
 		PriorityTipGwei:      1,
 		GasReserveETH:        0.002,
@@ -116,11 +110,8 @@ func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
 		ConcurrentBuys:     s.ConcurrentBuys,
 		ChipTarget:         s.ChipTarget,
 		Graduate:           s.Graduate,
-		HighHold:           s.HighHold,
-		OscillationBand:    s.OscillationBand,
 		SellInterval:       time.Duration(s.SellIntervalMS) * time.Millisecond,
 		ConcurrentSells:    !s.SequentialSells,
-		SellTranche:        s.SellTranche,
 		SlippageBps:        s.SlippageBps,
 		PriorityTipGwei:    s.PriorityTipGwei,
 		GasReserveETH:      s.GasReserveETH,
@@ -169,13 +160,51 @@ func (s Strategy) protocolName() string {
 }
 
 type JobStatus struct {
-	StrategyID  string `json:"strategyId"`
-	State       string `json:"state"`
-	Message     string `json:"message"`
-	StartedAt   string `json:"startedAt"`
-	Token       string `json:"token"`
-	Pool        string `json:"pool"`
-	LastUpdated string `json:"lastUpdated"`
+	StrategyID  string    `json:"strategyId"`
+	State       string    `json:"state"`
+	Message     string    `json:"message"`
+	StartedAt   string    `json:"startedAt"`
+	Token       string    `json:"token"`
+	Pool        string    `json:"pool"`
+	LastUpdated string    `json:"lastUpdated"`
+	Stats       *JobStats `json:"stats,omitempty"`
+}
+
+// JobStats is the per-strategy execution dashboard: trade counts, volumes,
+// total overhead paid, and the round's realized profit once the run ends.
+// All ETH values are decimal strings.
+type JobStats struct {
+	BuyCount     int64  `json:"buyCount"`
+	SellCount    int64  `json:"sellCount"`
+	EthSpent     string `json:"ethSpent"`     // ETH paid into buys
+	EthReceived  string `json:"ethReceived"`  // ETH received from sells
+	TokensSold   string `json:"tokensSold"`   // whole tokens sold
+	TotalCost    string `json:"totalCost"`    // gas + priority tips + launch fee
+	StartBalance string `json:"startBalance"` // summed wallet ETH at start
+	EndBalance   string `json:"endBalance"`   // summed wallet ETH at finish; empty while running
+	Profit       string `json:"profit"`       // end - start; empty while running
+}
+
+// InitStatus is the result of the application's startup initialization check.
+type InitStatus struct {
+	Checked    bool   `json:"checked"`
+	OK         bool   `json:"ok"`
+	BalanceETH string `json:"balanceEth"`
+	Message    string `json:"message"`
+	CheckedAt  string `json:"checkedAt"`
+}
+
+// LaunchPreset is the metadata of the most recent factory launch, used to
+// prefill a test strategy's token settings.
+type LaunchPreset struct {
+	TokenAddress string  `json:"tokenAddress"`
+	CurveAddress string  `json:"curveAddress"`
+	Block        uint64  `json:"block"`
+	Name         string  `json:"name"`
+	Symbol       string  `json:"symbol"`
+	Logo         string  `json:"logo"`
+	Description  string  `json:"description"`
+	Socials      Socials `json:"socials"`
 }
 
 type LogEntry struct {
@@ -197,4 +226,5 @@ type Bootstrap struct {
 	Jobs       []JobStatus `json:"jobs"`
 	Logs       []LogEntry  `json:"logs"`
 	Vault      VaultState  `json:"vault"`
+	Init       InitStatus  `json:"init"`
 }

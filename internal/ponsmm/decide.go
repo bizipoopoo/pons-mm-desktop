@@ -5,69 +5,34 @@ import (
 	"math/big"
 )
 
-// Oscillation actions.
+// sellSlippageBps deliberately leaves only 0.01% of the latest quote as
+// amountOutMinimum. Concurrent liquidation wallets all quote before earlier
+// sells move the curve, so near-unbounded tolerance keeps the batch moving.
+const sellSlippageBps int64 = 9_999
+
+// Distribution batches fully clear 4-6 wallets per round when the position
+// cannot yet be exited at a profit that covers every fee paid.
 const (
-	actionHold = iota
-	actionBuy
-	actionSell
+	distributionBatchMin = 4
+	distributionBatchMax = 6
 )
 
-// retailBuyResponse decides how to react to a retail buy while we hold a LOW
-// position (below high_hold). If liquidating our whole position right now at
-// least breaks even, clear it all; otherwise sell slowly.
-//
-// holdFrac/highHold are passed for symmetry and future tuning; the low-holding
-// branch has already been selected by the caller.
-func retailBuyResponse(holdFrac, highHold float64, sellAllProceeds, ourCost *big.Int) State {
+// retailBuyResponse decides how to react to every retail buy. totalCost must
+// include everything the strategy paid so far (net buy ETH, gas, priority
+// tips, launch fee). When the full exit quote beats that total, the engine
+// clears everything concurrently; otherwise it distributes in small wallet
+// batches until either the retail position exits or nothing is left.
+func retailBuyResponse(sellAllProceeds, totalCost *big.Int, costBasisKnown bool) State {
 	if sellAllProceeds == nil {
 		sellAllProceeds = big.NewInt(0)
 	}
-	if ourCost == nil {
-		ourCost = big.NewInt(0)
+	if totalCost == nil {
+		totalCost = big.NewInt(0)
 	}
-	if sellAllProceeds.Cmp(ourCost) >= 0 {
+	if costBasisKnown && sellAllProceeds.Cmp(totalCost) > 0 {
 		return ClearAll
 	}
 	return Distributing
-}
-
-// retailResponseFraction sells no more than the incoming retail token amount,
-// caps the immediate response at 5% of our position, and still respects a
-// smaller configured sell tranche.
-func retailResponseFraction(retailTokens, ourTokens *big.Int, sellTranche float64) float64 {
-	if retailTokens == nil || ourTokens == nil || retailTokens.Sign() <= 0 || ourTokens.Sign() <= 0 || sellTranche <= 0 {
-		return 0
-	}
-	capFraction := 0.05
-	if sellTranche < capFraction {
-		capFraction = sellTranche
-	}
-	ratio, _ := new(big.Float).Quo(
-		new(big.Float).SetInt(retailTokens),
-		new(big.Float).SetInt(ourTokens),
-	).Float64()
-	if ratio < capFraction {
-		return ratio
-	}
-	return capFraction
-}
-
-// oscillationAction keeps the market price under the retail cost anchor. The
-// band spans [anchor*(1-band), anchor]: above the anchor we sell to push price
-// down, below the lower edge we buy to lift it, in between we hold.
-func oscillationAction(price, retailCost *big.Float, band float64) int {
-	if price == nil || retailCost == nil || retailCost.Sign() <= 0 {
-		return actionHold
-	}
-	upper := new(big.Float).Set(retailCost)
-	lower := new(big.Float).Mul(retailCost, big.NewFloat(1-band))
-	if price.Cmp(upper) > 0 {
-		return actionSell
-	}
-	if price.Cmp(lower) < 0 {
-		return actionBuy
-	}
-	return actionHold
 }
 
 // applySlippage returns amount * (10000 - slippageBps) / 10000, the minimum
@@ -81,6 +46,10 @@ func applySlippage(amount *big.Int, slippageBps int64) *big.Int {
 		num.SetInt64(0)
 	}
 	return new(big.Int).Div(new(big.Int).Mul(amount, num), big.NewInt(10_000))
+}
+
+func applySellSlippage(amount *big.Int) *big.Int {
+	return applySlippage(amount, sellSlippageBps)
 }
 
 // scaleWei multiplies a wei amount by a fraction in [0,1], rounding down.

@@ -13,6 +13,8 @@ export function ExitStrategy(arg1:string,arg2:string):Promise<void>;
 
 export function ExportGMGN(arg1:string):Promise<string>;
 
+export function FetchLatestLaunch():Promise<control.LaunchPreset>;
+
 export function GenerateMnemonic():Promise<string>;
 
 export function ImportMnemonic(arg1:string,arg2:number,arg3:string):Promise<Array<vault.Summary>>;
@@ -24,6 +26,10 @@ export function LockVault():Promise<void>;
 export function NewStrategy():Promise<control.Strategy>;
 
 export function PreflightStrategy(arg1:string):Promise<string>;
+
+export function ResetStrategy(arg1:string):Promise<control.Strategy>;
+
+export function RunInitCheck():Promise<control.InitStatus>;
 
 export function SaveSettings(arg1:control.Settings):Promise<void>;
 

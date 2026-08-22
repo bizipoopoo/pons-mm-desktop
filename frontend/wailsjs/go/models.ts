@@ -52,6 +52,34 @@ export namespace control {
 	        this.message = source["message"];
 	    }
 	}
+	export class JobStats {
+	    buyCount: number;
+	    sellCount: number;
+	    ethSpent: string;
+	    ethReceived: string;
+	    tokensSold: string;
+	    totalCost: string;
+	    startBalance: string;
+	    endBalance: string;
+	    profit: string;
+
+	    static createFrom(source: any = {}) {
+	        return new JobStats(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.buyCount = source["buyCount"];
+	        this.sellCount = source["sellCount"];
+	        this.ethSpent = source["ethSpent"];
+	        this.ethReceived = source["ethReceived"];
+	        this.tokensSold = source["tokensSold"];
+	        this.totalCost = source["totalCost"];
+	        this.startBalance = source["startBalance"];
+	        this.endBalance = source["endBalance"];
+	        this.profit = source["profit"];
+	    }
+	}
 	export class JobStatus {
 	    strategyId: string;
 	    state: string;
@@ -60,6 +88,7 @@ export namespace control {
 	    token: string;
 	    pool: string;
 	    lastUpdated: string;
+	    stats?: JobStats;
 
 	    static createFrom(source: any = {}) {
 	        return new JobStatus(source);
@@ -74,6 +103,27 @@ export namespace control {
 	        this.token = source["token"];
 	        this.pool = source["pool"];
 	        this.lastUpdated = source["lastUpdated"];
+	        this.stats = source["stats"] ? new JobStats(source["stats"]) : undefined;
+	    }
+	}
+	export class InitStatus {
+	    checked: boolean;
+	    ok: boolean;
+	    balanceEth: string;
+	    message: string;
+	    checkedAt: string;
+
+	    static createFrom(source: any = {}) {
+	        return new InitStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checked = source["checked"];
+	        this.ok = source["ok"];
+	        this.balanceEth = source["balanceEth"];
+	        this.message = source["message"];
+	        this.checkedAt = source["checkedAt"];
 	    }
 	}
 	export class Socials {
@@ -154,11 +204,8 @@ export namespace control {
 	    concurrentBuys: boolean;
 	    chipTarget: number;
 	    graduate: boolean;
-	    highHold: number;
-	    oscillationBand: number;
 	    sellIntervalMs: number;
 	    sequentialSells: boolean;
-	    sellTranche: number;
 	    slippageBps: number;
 	    priorityTipGwei: number;
 	    gasReserveEth: number;
@@ -188,11 +235,8 @@ export namespace control {
 	        this.concurrentBuys = source["concurrentBuys"];
 	        this.chipTarget = source["chipTarget"];
 	        this.graduate = source["graduate"];
-	        this.highHold = source["highHold"];
-	        this.oscillationBand = source["oscillationBand"];
 	        this.sellIntervalMs = source["sellIntervalMs"];
 	        this.sequentialSells = source["sequentialSells"];
-	        this.sellTranche = source["sellTranche"];
 	        this.slippageBps = source["slippageBps"];
 	        this.priorityTipGwei = source["priorityTipGwei"];
 	        this.gasReserveEth = source["gasReserveEth"];
@@ -232,12 +276,39 @@ export namespace control {
 	        this.gmgnViewerWallet = source["gmgnViewerWallet"];
 	    }
 	}
+	export class LaunchPreset {
+	    tokenAddress: string;
+	    curveAddress: string;
+	    block: number;
+	    name: string;
+	    symbol: string;
+	    logo: string;
+	    description: string;
+	    socials: Socials;
+
+	    static createFrom(source: any = {}) {
+	        return new LaunchPreset(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.tokenAddress = source["tokenAddress"];
+	        this.curveAddress = source["curveAddress"];
+	        this.block = source["block"];
+	        this.name = source["name"];
+	        this.symbol = source["symbol"];
+	        this.logo = source["logo"];
+	        this.description = source["description"];
+	        this.socials = new Socials(source["socials"] || {});
+	    }
+	}
 	export class Bootstrap {
 	    settings: Settings;
 	    strategies: Strategy[];
 	    jobs: JobStatus[];
 	    logs: LogEntry[];
 	    vault: VaultState;
+	    init: InitStatus;
 
 	    static createFrom(source: any = {}) {
 	        return new Bootstrap(source);
@@ -250,6 +321,7 @@ export namespace control {
 	        this.jobs = this.convertValues(source["jobs"], JobStatus);
 	        this.logs = this.convertValues(source["logs"], LogEntry);
 	        this.vault = this.convertValues(source["vault"], VaultState);
+	        this.init = this.convertValues(source["init"], InitStatus);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

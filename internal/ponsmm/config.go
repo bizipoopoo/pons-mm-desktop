@@ -49,20 +49,19 @@ type Config struct {
 
 	// Accumulation.
 	BuyFraction        float64       `yaml:"buy_fraction"`        // fraction of a wallet's spendable ETH per buy (default 0.99)
-	AccumulateInterval time.Duration `yaml:"accumulate_interval"` // minimum cadence between accumulation rounds (default 1s)
-	ConcurrentBuys     bool          `yaml:"concurrent_buys"`     // buy from every funded maker in the same round
-	ChipTarget         float64       `yaml:"chip_target"`         // target fraction of circulating supply to hold before easing off (default 0.9)
+	AccumulateInterval time.Duration `yaml:"accumulate_interval"` // minimum cadence between accumulation rounds (default 100ms)
+	ConcurrentBuys     bool          `yaml:"concurrent_buys"`     // buy from every funded maker in the same round (default true)
+	ChipTarget         float64       `yaml:"chip_target"`         // target fraction of total supply to hold before easing off (default 0.9)
 	Graduate           bool          `yaml:"graduate"`            // keep buying until the pool reaches the graduation threshold
 
-	// Market making.
-	HighHold        float64       `yaml:"high_hold"`        // our holding of circulating at/above which we oscillate instead of distributing (default 0.60)
-	OscillationBand float64       `yaml:"oscillation_band"` // lower band below the retail price anchor (default 0.20)
+	// Liquidation. A profitable retail buy (full-exit quote covering every fee
+	// paid) always triggers an immediate concurrent full exit; otherwise the
+	// engine clears 4-6 wallets per batch at SellInterval cadence.
 	SellInterval    time.Duration `yaml:"sell_interval"`    // minimum cadence between sell rounds (default 1s)
-	ConcurrentSells bool          `yaml:"concurrent_sells"` // sell every wallet's tranche concurrently (default true)
-	SellTranche     float64       `yaml:"sell_tranche"`     // fraction of remaining holding sold per distribute tranche (default 0.25)
+	ConcurrentSells bool          `yaml:"concurrent_sells"` // clear wallets in each batch concurrently (default true)
 
 	// Execution.
-	SlippageBps     int64   `yaml:"slippage_bps"`      // per-trade slippage tolerance in bps (default 1500 = 15%)
+	SlippageBps     int64   `yaml:"slippage_bps"`      // buy slippage tolerance in bps (default 1500 = 15%); sells use 9999 bps
 	PriorityTipGwei float64 `yaml:"priority_tip_gwei"` // extra priority tip added to suggested gas (default 1)
 	GasReserveETH   float64 `yaml:"gas_reserve_eth"`   // ETH held back per wallet for gas, never spent on buys (default 0.002)
 }
@@ -93,15 +92,12 @@ func DefaultConfig() Config {
 	return Config{
 		Protocol:           ProtocolV2,
 		BuyFraction:        0.99,
-		AccumulateInterval: time.Second,
-		ConcurrentBuys:     false,
+		AccumulateInterval: 100 * time.Millisecond,
+		ConcurrentBuys:     true,
 		ChipTarget:         0.9,
 		Graduate:           true,
-		HighHold:           0.60,
-		OscillationBand:    0.20,
 		SellInterval:       time.Second,
 		ConcurrentSells:    true,
-		SellTranche:        0.25,
 		SlippageBps:        1500,
 		PriorityTipGwei:    1,
 		GasReserveETH:      0.002,
@@ -146,15 +142,6 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 	}
 	if c.BuyFraction <= 0 || c.BuyFraction > 1 {
 		return fmt.Errorf("buy_fraction must be in (0, 1]")
-	}
-	if c.HighHold <= 0 || c.HighHold > 1 {
-		return fmt.Errorf("high_hold must be in (0, 1]")
-	}
-	if c.OscillationBand <= 0 || c.OscillationBand >= 1 {
-		return fmt.Errorf("oscillation_band must be in (0, 1)")
-	}
-	if c.SellTranche <= 0 || c.SellTranche > 1 {
-		return fmt.Errorf("sell_tranche must be in (0, 1]")
 	}
 	if c.AccumulateInterval <= 0 || c.SellInterval <= 0 {
 		return fmt.Errorf("accumulate_interval and sell_interval must be > 0")

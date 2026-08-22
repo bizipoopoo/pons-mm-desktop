@@ -153,7 +153,34 @@ type CurveTrade struct {
 	QuoteAmount *big.Int
 	Trader      common.Address
 	Recipient   common.Address
+	Block       uint64
+	LogIndex    uint
 	TxHash      common.Hash
+}
+
+// FilterCurveTradeEvents returns curve trades in an inclusive block range.
+// Monitors use it to recover trades that landed before a live subscription was
+// established and to cover temporary subscription gaps.
+func (c *Client) FilterCurveTradeEvents(ctx context.Context, curve common.Address, fromBlock, toBlock uint64) ([]CurveTrade, error) {
+	if toBlock < fromBlock {
+		return nil, nil
+	}
+	logs, err := c.eth.FilterLogs(ctx, ethereum.FilterQuery{
+		Addresses: []common.Address{curve},
+		Topics:    [][]common.Hash{{curveBuyTopic, curveSellTopic}},
+		FromBlock: new(big.Int).SetUint64(fromBlock),
+		ToBlock:   new(big.Int).SetUint64(toBlock),
+	})
+	if err != nil {
+		return nil, err
+	}
+	trades := make([]CurveTrade, 0, len(logs))
+	for _, lg := range logs {
+		if trade, ok := decodeCurveTrade(lg); ok {
+			trades = append(trades, trade)
+		}
+	}
+	return trades, nil
 }
 
 // WatchCurveTradeEvents subscribes to decoded CurveBuy/CurveSell logs. It
@@ -235,6 +262,8 @@ func decodeCurveTrade(lg types.Log) (CurveTrade, bool) {
 	trade := CurveTrade{
 		Trader:    common.BytesToAddress(lg.Topics[1].Bytes()),
 		Recipient: common.BytesToAddress(lg.Topics[2].Bytes()),
+		Block:     lg.BlockNumber,
+		LogIndex:  lg.Index,
 		TxHash:    lg.TxHash,
 	}
 	switch lg.Topics[0] {
@@ -264,4 +293,21 @@ func decodeCurveTrade(lg types.Log) (CurveTrade, bool) {
 		return CurveTrade{}, false
 	}
 	return trade, trade.TokenAmount != nil && trade.QuoteAmount != nil
+}
+
+// CurveTradesFromReceipt returns every v2 curve trade emitted by a confirmed
+// transaction. Receipt decoding avoids a balance-difference race when an
+// emergency sell is already queued behind the buy in the same wallet nonce
+// sequence.
+func CurveTradesFromReceipt(rcpt *types.Receipt) []CurveTrade {
+	if rcpt == nil {
+		return nil
+	}
+	var trades []CurveTrade
+	for _, lg := range rcpt.Logs {
+		if trade, ok := decodeCurveTrade(*lg); ok {
+			trades = append(trades, trade)
+		}
+	}
+	return trades
 }

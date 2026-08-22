@@ -22,6 +22,10 @@ export function ExportGMGN(arg1) {
   return window['go']['main']['App']['ExportGMGN'](arg1);
 }
 
+export function FetchLatestLaunch() {
+  return window['go']['main']['App']['FetchLatestLaunch']();
+}
+
 export function GenerateMnemonic() {
   return window['go']['main']['App']['GenerateMnemonic']();
 }
@@ -44,6 +48,14 @@ export function NewStrategy() {
 
 export function PreflightStrategy(arg1) {
   return window['go']['main']['App']['PreflightStrategy'](arg1);
+}
+
+export function ResetStrategy(arg1) {
+  return window['go']['main']['App']['ResetStrategy'](arg1);
+}
+
+export function RunInitCheck() {
+  return window['go']['main']['App']['RunInitCheck']();
 }
 
 export function SaveSettings(arg1) {

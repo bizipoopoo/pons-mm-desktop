@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -21,6 +22,17 @@ type Wallet struct {
 	Signer *pons.Signer
 	Addr   common.Address
 
+	// txMu serializes nonce allocation + broadcast for this wallet. A retail
+	// exit may race an accumulation worker; the sell must be queued strictly
+	// behind any buy that was already broadcast, never reuse its nonce.
+	txMu sync.Mutex
+	// sellMu keeps two exit passes from sizing sells against the same confirmed
+	// balance while an earlier sell is still pending.
+	sellMu sync.Mutex
+	// balanceMu protects cached balances while buy confirmations are settled by
+	// a background goroutine and the main strategy loop is selling.
+	balanceMu sync.RWMutex
+
 	// Cached on refresh; the engine keeps them roughly current itself.
 	ETHWei   *big.Int
 	TokenRaw *big.Int
@@ -30,6 +42,8 @@ type Wallet struct {
 // spendableWei is the ETH a wallet may spend on a buy after holding back the
 // gas reserve.
 func (w *Wallet) spendableWei(gasReserveWei *big.Int) *big.Int {
+	w.balanceMu.RLock()
+	defer w.balanceMu.RUnlock()
 	if w.ETHWei == nil {
 		return big.NewInt(0)
 	}
@@ -38,6 +52,71 @@ func (w *Wallet) spendableWei(gasReserveWei *big.Int) *big.Int {
 		return big.NewInt(0)
 	}
 	return s
+}
+
+func (w *Wallet) ethBalance() *big.Int {
+	w.balanceMu.RLock()
+	defer w.balanceMu.RUnlock()
+	if w.ETHWei == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(w.ETHWei)
+}
+
+func (w *Wallet) setETHBalance(v *big.Int) {
+	w.balanceMu.Lock()
+	defer w.balanceMu.Unlock()
+	if v == nil {
+		w.ETHWei = big.NewInt(0)
+		return
+	}
+	w.ETHWei = new(big.Int).Set(v)
+}
+
+func (w *Wallet) addETH(v *big.Int) {
+	if v == nil {
+		return
+	}
+	w.balanceMu.Lock()
+	defer w.balanceMu.Unlock()
+	if w.ETHWei == nil {
+		w.ETHWei = big.NewInt(0)
+	}
+	w.ETHWei.Add(w.ETHWei, v)
+}
+
+func (w *Wallet) tokenBalance() *big.Int {
+	w.balanceMu.RLock()
+	defer w.balanceMu.RUnlock()
+	if w.TokenRaw == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(w.TokenRaw)
+}
+
+func (w *Wallet) setTokenBalance(v *big.Int) {
+	w.balanceMu.Lock()
+	defer w.balanceMu.Unlock()
+	if v == nil {
+		w.TokenRaw = big.NewInt(0)
+		return
+	}
+	w.TokenRaw = new(big.Int).Set(v)
+}
+
+func (w *Wallet) subtractToken(v *big.Int) {
+	if v == nil {
+		return
+	}
+	w.balanceMu.Lock()
+	defer w.balanceMu.Unlock()
+	if w.TokenRaw == nil {
+		w.TokenRaw = big.NewInt(0)
+	}
+	w.TokenRaw.Sub(w.TokenRaw, v)
+	if w.TokenRaw.Sign() < 0 {
+		w.TokenRaw.SetInt64(0)
+	}
 }
 
 // Pool is the treasury wallet plus the market-making wallets.
@@ -124,7 +203,7 @@ func (p *Pool) RefreshETH(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("balance %s: %w", w.Addr.Hex(), err)
 		}
-		w.ETHWei = bal
+		w.setETHBalance(bal)
 		n, err := p.Client.PendingNonce(ctx, w.Addr)
 		if err != nil {
 			return fmt.Errorf("nonce %s: %w", w.Addr.Hex(), err)
@@ -141,18 +220,25 @@ func (p *Pool) RefreshToken(ctx context.Context, token common.Address) error {
 		if err != nil {
 			return fmt.Errorf("token balance %s: %w", w.Addr.Hex(), err)
 		}
-		w.TokenRaw = bal
+		w.setTokenBalance(bal)
 	}
 	return nil
+}
+
+// totalETH sums the cached native balances across all wallets.
+func (p *Pool) totalETH() *big.Int {
+	sum := big.NewInt(0)
+	for _, w := range p.All() {
+		sum.Add(sum, w.ethBalance())
+	}
+	return sum
 }
 
 // TotalTokens sums the pool's launch-token holdings across all wallets.
 func (p *Pool) TotalTokens() *big.Int {
 	sum := big.NewInt(0)
 	for _, w := range p.All() {
-		if w.TokenRaw != nil {
-			sum.Add(sum, w.TokenRaw)
-		}
+		sum.Add(sum, w.tokenBalance())
 	}
 	return sum
 }
@@ -185,10 +271,11 @@ func (p *Pool) Fund(ctx context.Context, perWalletWei, extraTipWei *big.Int) err
 	}
 	const transferGas = 21_000
 	for _, w := range p.Makers {
-		if w.ETHWei.Cmp(perWalletWei) >= 0 {
+		current := w.ethBalance()
+		if current.Cmp(perWalletWei) >= 0 {
 			continue
 		}
-		need := new(big.Int).Sub(perWalletWei, w.ETHWei)
+		need := new(big.Int).Sub(perWalletWei, current)
 		pr, err := p.txParams(ctx, p.Treasury, transferGas, extraTipWei)
 		if err != nil {
 			return err
@@ -222,10 +309,11 @@ func (p *Pool) CollectETH(ctx context.Context, gasReserveWei, extraTipWei *big.I
 	gasCost := new(big.Int).Mul(feeCap, big.NewInt(transferGas))
 	keep := new(big.Int).Add(gasReserveWei, gasCost)
 	for _, w := range p.Makers {
-		if w.ETHWei == nil {
+		current := w.ethBalance()
+		if current.Sign() == 0 {
 			continue
 		}
-		amount := new(big.Int).Sub(w.ETHWei, keep)
+		amount := new(big.Int).Sub(current, keep)
 		if amount.Sign() <= 0 {
 			continue
 		}

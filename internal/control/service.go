@@ -44,6 +44,7 @@ type Service struct {
 	usedWallets map[string]string
 	logs        []LogEntry
 	emit        func(string, any)
+	init        InitStatus
 }
 
 func NewService(dataDir string) (*Service, error) {
@@ -86,10 +87,12 @@ func (s *Service) Bootstrap() Bootstrap {
 		jobs = append(jobs, job.status)
 	}
 	logs := append([]LogEntry(nil), s.logs...)
+	init := s.init
 	s.mu.RUnlock()
 	return Bootstrap{
 		Settings: settings, Strategies: strategies, Jobs: jobs, Logs: logs,
 		Vault: VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.vault.Summaries()},
+		Init:  init,
 	}
 }
 
@@ -227,6 +230,12 @@ func (s *Service) Start(id, confirmation string) error {
 	if confirmation != "LIVE" {
 		return errors.New("live confirmation phrase is required")
 	}
+	if init := s.initState(); !init.OK {
+		if !init.Checked {
+			return errors.New("startup initialization has not completed yet; retry in a moment")
+		}
+		return fmt.Errorf("startup initialization failed: %s", init.Message)
+	}
 	strategy, ok := s.config.strategy(id)
 	if !ok {
 		return errors.New("strategy not found")
@@ -355,6 +364,7 @@ func (s *Service) runStrategy(ctx context.Context, strategy Strategy, settings S
 	defer client.Close()
 	client.WarmGas(ctx)
 	eng := ponsmm.NewEngine(cfg, client, pool, logger)
+	eng.SetStatsListener(func(st ponsmm.Stats) { s.updateEngineStats(strategy.ID, st) })
 	if strategy.Mode == ModeLaunch {
 		if err := eng.Launch(ctx, false); err != nil {
 			s.finish(strategy.ID, "error", err.Error(), "", "")

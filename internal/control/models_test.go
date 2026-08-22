@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bizipoopoo/pons-mm-desktop/internal/ponsmm"
 )
@@ -16,11 +17,21 @@ func TestNewStrategyDefaultsToV2(t *testing.T) {
 	if s.DevBuyETH != 0 {
 		t.Fatalf("new v2 strategy dev buy = %v, want 0", s.DevBuyETH)
 	}
-	if s.AccumulateIntervalMS != 1000 || s.SellIntervalMS != 1000 {
-		t.Fatalf("new strategy intervals = %d/%d, want 1000/1000", s.AccumulateIntervalMS, s.SellIntervalMS)
+	if s.AccumulateIntervalMS != 100 || s.SellIntervalMS != 1000 {
+		t.Fatalf("new strategy intervals = %d/%d, want 100/1000", s.AccumulateIntervalMS, s.SellIntervalMS)
 	}
-	if s.ConcurrentBuys || s.SequentialSells {
-		t.Fatalf("new strategy concurrency = buys:%v sequential-sells:%v, want false/false", s.ConcurrentBuys, s.SequentialSells)
+	if !s.ConcurrentBuys || s.SequentialSells {
+		t.Fatalf("new strategy concurrency = buys:%v sequential-sells:%v, want true/false", s.ConcurrentBuys, s.SequentialSells)
+	}
+}
+
+func TestEngineConfigCarriesFastConcurrentBuySettings(t *testing.T) {
+	s := NewStrategy()
+	s.AccumulateIntervalMS = 500
+	s.ConcurrentBuys = true
+	cfg := s.engineConfig(Settings{})
+	if cfg.AccumulateInterval != 500*time.Millisecond || !cfg.ConcurrentBuys {
+		t.Fatalf("engine buy execution = %s concurrent:%v, want 500ms/true", cfg.AccumulateInterval, cfg.ConcurrentBuys)
 	}
 }
 

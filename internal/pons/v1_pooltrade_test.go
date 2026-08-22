@@ -32,6 +32,9 @@ func TestDecodePoolTradeBuyTokenIsToken1(t *testing.T) {
 	buyer := common.HexToAddress("0xBuyer")
 	// token = token1, weth = token0. A buy: weth in (+100), token out (-500).
 	lg := packSwap(t, sender, buyer, big.NewInt(100), big.NewInt(-500))
+	lg.TxHash = common.HexToHash("0x1234")
+	lg.BlockNumber = 42
+	lg.Index = 7
 	tr, ok := decodePoolTrade(lg, false)
 	if !ok {
 		t.Fatal("decode failed")
@@ -44,6 +47,9 @@ func TestDecodePoolTradeBuyTokenIsToken1(t *testing.T) {
 	}
 	if tr.Recipient != buyer {
 		t.Fatalf("recipient = %s, want %s", tr.Recipient.Hex(), buyer.Hex())
+	}
+	if tr.TxHash != lg.TxHash || tr.Block != 42 || tr.LogIndex != 7 {
+		t.Fatalf("decoded log position is wrong: %+v", tr)
 	}
 }
 

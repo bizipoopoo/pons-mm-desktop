@@ -73,6 +73,13 @@ func (c *Client) L1BlockNumber(ctx context.Context) (uint64, error) {
 func (c *Client) ChainID() *big.Int      { return c.chainID }
 func (c *Client) Eth() *ethclient.Client { return c.eth }
 
+// BlockNumber returns the latest L2 execution block used by transaction logs.
+// It is intentionally separate from L1BlockNumber, which is only for launch
+// restriction rules.
+func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
+	return c.eth.BlockNumber(ctx)
+}
+
 // Close releases the underlying RPC connection. A desktop session may run
 // several independent strategies, so each strategy owns and closes its client.
 func (c *Client) Close() {

@@ -84,13 +84,16 @@ func TestDecodeCurveTrade(t *testing.T) {
 	hash := common.HexToHash("0x1234")
 	trade, ok := decodeCurveTrade(types.Log{
 		Topics: []common.Hash{curveBuyTopic, common.BytesToHash(buyer.Bytes()), common.BytesToHash(recipient.Bytes())},
-		Data:   data, TxHash: hash,
+		Data:   data, TxHash: hash, BlockNumber: 42, Index: 7,
 	})
 	if !ok {
 		t.Fatal("curve buy did not decode")
 	}
 	if !trade.IsBuy || trade.Trader != buyer || trade.Recipient != recipient || trade.TxHash != hash {
 		t.Fatalf("decoded metadata is wrong: %+v", trade)
+	}
+	if trade.Block != 42 || trade.LogIndex != 7 {
+		t.Fatalf("decoded log position = %d/%d, want 42/7", trade.Block, trade.LogIndex)
 	}
 	if trade.QuoteAmount.Cmp(quoteIn) != 0 || trade.TokenAmount.Cmp(tokensOut) != 0 {
 		t.Fatalf("decoded amounts are wrong: %+v", trade)

@@ -36,6 +36,9 @@ func (a *App) startup(ctx context.Context) {
 	a.service.SetRuntime(ctx, func(name string, value any) {
 		runtime.EventsEmit(ctx, name, value)
 	})
+	// Startup initialization: verify the gate wallet balance on the public
+	// Robinhood node before any strategy may go live.
+	go a.service.RunInitCheck()
 }
 
 func (a *App) shutdown(context.Context) { a.service.Shutdown() }
@@ -71,6 +74,17 @@ func (a *App) PreflightStrategy(id string) (string, error) { return a.service.Pr
 func (a *App) StartStrategy(id, confirmation string) error { return a.service.Start(id, confirmation) }
 func (a *App) StopStrategy(id string) error                { return a.service.Stop(id) }
 func (a *App) ExitStrategy(id, confirmation string) error  { return a.service.ExitAll(id, confirmation) }
+
+// RunInitCheck re-runs the startup initialization gate on demand.
+func (a *App) RunInitCheck() control.InitStatus { return a.service.RunInitCheck() }
+
+// ResetStrategy clears a fully-sold strategy's launched token so the same
+// configuration can immediately launch and test a fresh token.
+func (a *App) ResetStrategy(id string) (control.Strategy, error) { return a.service.ResetStrategy(id) }
+
+// FetchLatestLaunch returns the newest factory launch's metadata for
+// prefilling a strategy's token settings.
+func (a *App) FetchLatestLaunch() (control.LaunchPreset, error) { return a.service.FetchLatestLaunch() }
 
 func (a *App) ExportGMGN(id string) (string, error) {
 	payload, err := a.service.GMGNImport(id)

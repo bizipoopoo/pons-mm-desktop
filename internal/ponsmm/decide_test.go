@@ -10,15 +10,17 @@ func TestRetailBuyResponse(t *testing.T) {
 	cases := []struct {
 		name           string
 		proceeds, cost int64
+		costBasisKnown bool
 		want           State
 	}{
-		{"break-even clears", 100, 100, ClearAll},
-		{"profit clears", 150, 100, ClearAll},
-		{"loss distributes", 90, 100, Distributing},
+		{"profit over total cost clears", 150, 100, true, ClearAll},
+		{"break-even distributes", 100, 100, true, Distributing},
+		{"loss distributes", 90, 100, true, Distributing},
+		{"unknown basis distributes", 150, 0, false, Distributing},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := retailBuyResponse(0.1, 0.6, big.NewInt(c.proceeds), big.NewInt(c.cost))
+			got := retailBuyResponse(big.NewInt(c.proceeds), big.NewInt(c.cost), c.costBasisKnown)
 			if got != c.want {
 				t.Fatalf("retailBuyResponse(proceeds=%d, cost=%d) = %s, want %s",
 					c.proceeds, c.cost, got, c.want)
@@ -27,45 +29,22 @@ func TestRetailBuyResponse(t *testing.T) {
 	}
 }
 
-func TestRetailResponseFraction(t *testing.T) {
-	if got := retailResponseFraction(big.NewInt(2), big.NewInt(100), 0.25); got < 0.0199 || got > 0.0201 {
-		t.Fatalf("small retail response = %f, want 0.02", got)
+func TestTotalCostIncludesGasAndLaunchFee(t *testing.T) {
+	engine := &Engine{}
+	engine.mutateStats(func(s *Stats) {
+		s.GasFeeWei.SetInt64(30)
+		s.LaunchFeeWei.SetInt64(20)
+	})
+	if got := engine.totalCostWei(big.NewInt(50)); got.Int64() != 100 {
+		t.Fatalf("total cost = %d, want 100 (net 50 + gas 30 + launch 20)", got.Int64())
 	}
-	if got := retailResponseFraction(big.NewInt(50), big.NewInt(100), 0.25); got != 0.05 {
-		t.Fatalf("retail response cap = %f, want 0.05", got)
+	// A full-exit quote of exactly the notional cost must NOT clear once fees
+	// are added on top.
+	if got := retailBuyResponse(big.NewInt(60), engine.totalCostWei(big.NewInt(50)), true); got != Distributing {
+		t.Fatalf("fees not covered must distribute, got %s", got)
 	}
-	if got := retailResponseFraction(big.NewInt(50), big.NewInt(100), 0.03); got != 0.03 {
-		t.Fatalf("configured tranche cap = %f, want 0.03", got)
-	}
-}
-
-func TestOscillationAction(t *testing.T) {
-	anchor := big.NewFloat(100)
-	band := 0.20 // band spans [80, 100]
-	cases := []struct {
-		name  string
-		price float64
-		want  int
-	}{
-		{"above anchor sells", 101, actionSell},
-		{"at anchor holds", 100, actionHold},
-		{"inside band holds", 90, actionHold},
-		{"at lower edge holds", 80, actionHold},
-		{"below band buys", 79, actionBuy},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := oscillationAction(big.NewFloat(c.price), anchor, band)
-			if got != c.want {
-				t.Fatalf("oscillationAction(price=%v) = %d, want %d", c.price, got, c.want)
-			}
-		})
-	}
-	if oscillationAction(nil, anchor, band) != actionHold {
-		t.Fatal("nil price must hold")
-	}
-	if oscillationAction(big.NewFloat(1), nil, band) != actionHold {
-		t.Fatal("nil anchor must hold")
+	if got := retailBuyResponse(big.NewInt(101), engine.totalCostWei(big.NewInt(50)), true); got != ClearAll {
+		t.Fatalf("fees covered with profit must clear, got %s", got)
 	}
 }
 
@@ -79,6 +58,16 @@ func TestApplySlippage(t *testing.T) {
 	}
 	if applySlippage(nil, 100).Sign() != 0 {
 		t.Fatal("nil amount must be zero")
+	}
+}
+
+func TestApplySellSlippageUsesMaximumTolerance(t *testing.T) {
+	quote := new(big.Int).SetUint64(1_000_000)
+	if got := applySellSlippage(quote); got.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("sell min out = %s, want 100 (0.01%% of quote)", got)
+	}
+	if sellSlippageBps != 9_999 {
+		t.Fatalf("sell slippage = %d bps, want 9999", sellSlippageBps)
 	}
 }
 
@@ -111,7 +100,7 @@ func TestConfigProtocolCompatibility(t *testing.T) {
 	if cfg.ProtocolName() != ProtocolV2 {
 		t.Fatalf("new config protocol = %q, want v2", cfg.ProtocolName())
 	}
-	if cfg.AccumulateInterval != time.Second || cfg.SellInterval != time.Second || cfg.ConcurrentBuys || !cfg.ConcurrentSells {
+	if cfg.AccumulateInterval != 100*time.Millisecond || cfg.SellInterval != time.Second || !cfg.ConcurrentBuys || !cfg.ConcurrentSells {
 		t.Fatalf("unexpected execution defaults: %+v", cfg)
 	}
 	legacy := Config{}

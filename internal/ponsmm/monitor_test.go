@@ -108,6 +108,53 @@ func TestMonitorRetailBuyUpdatesState(t *testing.T) {
 	}
 }
 
+func TestMonitorBuffersRetailBurst(t *testing.T) {
+	stranger := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	m := newTestMonitor(testPool(), new(big.Int).SetUint64(1_000_000))
+	if cap(m.Retail) < 4096 {
+		t.Fatalf("retail event buffer = %d, want at least 4096", cap(m.Retail))
+	}
+	for i := 0; i < cap(m.Retail); i++ {
+		m.onTrade(pons.PoolTrade{
+			IsBuy: true, TokenAmount: big.NewInt(1), WethAmount: big.NewInt(1),
+			Recipient: stranger, Sender: common.HexToAddress("0xRouter"),
+		})
+	}
+	if got := len(m.Retail); got != cap(m.Retail) {
+		t.Fatalf("buffered retail events = %d, want %d", got, cap(m.Retail))
+	}
+}
+
+func TestMonitorDeduplicatesRecoveredAndLiveTrade(t *testing.T) {
+	stranger := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	m := newTestMonitor(testPool(), new(big.Int).SetUint64(1_000_000))
+	trade := pons.PoolTrade{
+		IsBuy: true, TokenAmount: big.NewInt(100), WethAmount: big.NewInt(10),
+		Recipient: stranger, Sender: common.HexToAddress("0xRouter"),
+		TxHash: common.HexToHash("0x1234"), Block: 42, LogIndex: 7,
+	}
+	if !m.consumeTrade(trade) {
+		t.Fatal("first delivery must be consumed")
+	}
+	if m.consumeTrade(trade) {
+		t.Fatal("duplicate live/recovery delivery must be ignored")
+	}
+	if got := m.Snapshot().RetailNetTokens.Int64(); got != 100 {
+		t.Fatalf("retail net tokens = %d, want one 100-token trade", got)
+	}
+	if got := len(m.Retail); got != 1 {
+		t.Fatalf("retail events = %d, want 1", got)
+	}
+
+	trade.LogIndex++
+	if !m.consumeTrade(trade) {
+		t.Fatal("a second log in the same transaction must remain distinct")
+	}
+	if got := m.Snapshot().RetailNetTokens.Int64(); got != 200 {
+		t.Fatalf("retail net tokens = %d, want two distinct logs", got)
+	}
+}
+
 func TestMonitorRetailExitClearsPriceAnchor(t *testing.T) {
 	stranger := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	m := newTestMonitor(testPool(), new(big.Int).SetUint64(1_000_000))
@@ -131,14 +178,14 @@ func TestMonitorRetailExitClearsPriceAnchor(t *testing.T) {
 func TestSnapshotHoldFraction(t *testing.T) {
 	supply := new(big.Int).SetUint64(1_000_000)
 	m := newTestMonitor(testPool(), supply)
-	// 300k tokens circulating (pool holds 700k), we hold 150k -> 50%.
+	// Pool reserve does not affect the denominator: 150k / 1M total = 15%.
 	m.mu.Lock()
 	m.poolTokenReserve = big.NewInt(700_000)
 	m.ourTokens = big.NewInt(150_000)
 	m.mu.Unlock()
 
 	snap := m.Snapshot()
-	if got := snap.OurHoldFrac; got < 0.499 || got > 0.501 {
-		t.Fatalf("hold fraction = %f, want ~0.5", got)
+	if got := snap.OurHoldFrac; got < 0.149 || got > 0.151 {
+		t.Fatalf("hold fraction = %f, want ~0.15 of total supply", got)
 	}
 }
