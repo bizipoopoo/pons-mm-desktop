@@ -253,7 +253,10 @@ func (m *Monitor) runCurve(ctx context.Context) {
 	if ready {
 		from = m.replayCurve(ctx, from)
 	}
-	tick := time.NewTicker(500 * time.Millisecond)
+	// Robinhood Chain produces a block every ~100ms and launch snipers act in
+	// the first blocks; a 500ms poll would add up to half a second of blind
+	// time on top of everything else.
+	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {

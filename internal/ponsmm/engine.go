@@ -416,9 +416,10 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	burst := e.launchBuyBurst(ctx, launched.Curve, pr)
 	e.recordLaunchCost(fee, rcpt)
 	e.log.Info("v2 token launched", "token", launched.Token.Hex(), "curve", launched.Curve.Hex(), "block", launched.Block)
-	if err := e.Bind(ctx, launched.Token, launched.Curve); err != nil {
-		return err
-	}
+	// Bind from data we already hold instead of re-reading the chain: the
+	// monitor must be watching within a second of the launch receipt, because
+	// snipers buy in the very first blocks.
+	e.bindV2FromLaunch(launched, launchCfg, int64(params.CreatorTaxBps))
 	e.monitor.SetStartBlock(launched.Block)
 	e.monitor.MarkOurTx(tx.Hash())
 	if devBuy.Sign() > 0 {
@@ -534,6 +535,26 @@ func (e *Engine) bindV1(ctx context.Context, token, poolAddr common.Address) err
 	return nil
 }
 
+// bindV2FromLaunch binds a token this engine just launched using data already
+// in hand: the preflighted launch config and the TokenLaunched event. A cold
+// bindV2 performs eight serial chain reads (~4s on the public RPC) to learn
+// values we chose ourselves seconds ago — time a launch sniper trades in
+// unanswered, since the trade monitor cannot start until the bind completes.
+func (e *Engine) bindV2FromLaunch(launched pons.Launch, launchCfg pons.V2LaunchConfig, creatorTaxBps int64) {
+	e.token, e.poolAddr = launched.Token, launched.Curve
+	e.supply = launchCfg.Supply
+	e.graduationThreshold = launched.GraduationThreshold
+	e.maxWalletBps = 0
+	e.v2Info = pons.LaunchInfo{
+		Token: launched.Token, Curve: launched.Curve, Deployer: e.pool.Treasury.Addr,
+		NativeQuote: true, FeeBps: launchCfg.CurveFeeBps.Int64(), CreatorTaxBps: creatorTaxBps,
+		Name: e.cfg.Token.Name, Symbol: e.cfg.Token.Symbol, Decimals: 18,
+	}
+	e.monitor = NewCurveMonitor(e.client, e.pool, launched.Token, launched.Curve, launchCfg.Supply, e.log)
+	e.launchAt = time.Now()
+	e.state = Accumulating
+}
+
 func (e *Engine) bindV2(ctx context.Context, token, curve common.Address) error {
 	if token == (common.Address{}) || curve == (common.Address{}) {
 		return fmt.Errorf("token and curve addresses are required for pons v2")
@@ -590,18 +611,26 @@ func (e *Engine) Run(ctx context.Context) error {
 		<-monitorDone
 	}()
 
-	if err := e.pool.RefreshETH(ctx); err != nil {
-		return err
+	// The three startup reads are independent; run them concurrently so the
+	// event loop (which acts on retail trades) starts as soon as possible.
+	var ethErr, tokErr error
+	var initWg sync.WaitGroup
+	initWg.Add(2)
+	go func() { defer initWg.Done(); ethErr = e.pool.RefreshETH(ctx) }()
+	go func() { defer initWg.Done(); tokErr = e.pool.RefreshToken(ctx, e.token) }()
+	if err := e.monitor.RefreshReserves(ctx); err != nil {
+		e.log.Warn("initial reserve refresh failed", "err", err)
+	}
+	initWg.Wait()
+	if ethErr != nil {
+		return ethErr
+	}
+	if tokErr != nil {
+		return tokErr
 	}
 	e.captureStartBalance()
 	defer e.finalizeStats()
 	e.lastFundsRefresh = time.Now()
-	if err := e.pool.RefreshToken(ctx, e.token); err != nil {
-		return err
-	}
-	if err := e.monitor.RefreshReserves(ctx); err != nil {
-		e.log.Warn("initial reserve refresh failed", "err", err)
-	}
 	e.seedMonitorFromBalances(ctx)
 
 	// Approval warming must not block the event loop. A sell can be queued behind
