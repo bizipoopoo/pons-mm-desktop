@@ -238,8 +238,15 @@ type V1Launched struct {
 // WaitReceipt polls for a transaction receipt until it is mined or ctx ends,
 // and fails on a reverted (status 0) transaction.
 func (c *Client) WaitReceipt(ctx context.Context, hash common.Hash, timeout time.Duration) (*types.Receipt, error) {
+	return c.WaitReceiptEvery(ctx, hash, timeout, 500*time.Millisecond)
+}
+
+// WaitReceiptEvery polls at a caller-chosen interval. Latency-critical paths
+// (the launch receipt that gates the first maker buys) poll much faster than
+// the default; Robinhood Chain produces blocks roughly every 100ms.
+func (c *Client) WaitReceiptEvery(ctx context.Context, hash common.Hash, timeout, poll time.Duration) (*types.Receipt, error) {
 	deadline := time.Now().Add(timeout)
-	t := time.NewTicker(500 * time.Millisecond)
+	t := time.NewTicker(poll)
 	defer t.Stop()
 	for {
 		rcpt, err := c.eth.TransactionReceipt(ctx, hash)

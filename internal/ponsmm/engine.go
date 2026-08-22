@@ -386,22 +386,88 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		return fmt.Errorf("send v2 launch: %w", err)
 	}
 	e.log.Info("v2 launch submitted", "tx", tx.Hash().Hex())
-	rcpt, err := e.client.WaitReceipt(ctx, tx.Hash(), 120*time.Second)
+	rcpt, err := e.client.WaitReceiptEvery(ctx, tx.Hash(), 120*time.Second, 100*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("v2 launch confirm: %w", err)
 	}
-	e.recordLaunchCost(fee, rcpt)
 	launched, ok := pons.V2LaunchedFromReceipt(rcpt)
 	if !ok {
 		return fmt.Errorf("v2 launch receipt %s carried no TokenLaunched event", tx.Hash().Hex())
 	}
+	// Broadcast the first maker buys before anything else touches the RPC:
+	// every millisecond here is a block on this chain, and launch snipers are
+	// already racing us.
+	burst := e.launchBuyBurst(ctx, launched.Curve, pr)
+	e.recordLaunchCost(fee, rcpt)
 	e.log.Info("v2 token launched", "token", launched.Token.Hex(), "curve", launched.Curve.Hex(), "block", launched.Block)
 	if err := e.Bind(ctx, launched.Token, launched.Curve); err != nil {
 		return err
 	}
 	e.monitor.SetStartBlock(launched.Block)
 	e.monitor.MarkOurTx(tx.Hash())
+	for _, b := range burst {
+		e.monitor.MarkOurTx(b.hash)
+		e.addPendingBuy()
+		// Queue the sell approval right behind the buy by nonce, mirroring the
+		// normal buy path, so an instant retail response can sell immediately.
+		if err := e.ensureApprove(ctx, b.wallet, big.NewInt(1), false); err != nil {
+			e.log.Warn("sell approval prewarm after burst buy failed", "wallet", b.wallet.Addr.Hex(), "err", err)
+		}
+		go e.settleBuy(ctx, b.wallet, b.spend, big.NewInt(0), b.hash)
+	}
 	return nil
+}
+
+type launchBurstBuy struct {
+	wallet *Wallet
+	spend  *big.Int
+	hash   common.Hash
+}
+
+// launchBuyBurst broadcasts the first maker buys the instant the launch
+// receipt is decoded. It deliberately performs no per-wallet RPC besides the
+// send itself: the token is seconds old so balances are zero and the curve
+// cannot have graduated, minTokensOut is zero because the makers are
+// registered snipe-tax-exempt first buyers, and the launch transaction's gas
+// pricing is reused. This lands our wallets within the first blocks after
+// launch instead of several seconds later.
+func (e *Engine) launchBuyBurst(ctx context.Context, curve common.Address, launchPr pons.TxParams) []launchBurstBuy {
+	eligible := e.fundedMakers()
+	if len(eligible) == 0 {
+		e.log.Warn("launch buy burst skipped: no maker wallet has spendable ETH")
+		return nil
+	}
+	// Sequential-buy configurations still snipe with the first maker; the
+	// remaining wallets follow on the normal accumulation cadence.
+	if !e.cfg.ConcurrentBuys {
+		eligible = eligible[:1]
+	}
+	gasReserve := ethToWei(e.cfg.GasReserveETH)
+	var mu sync.Mutex
+	out := make([]launchBurstBuy, 0, len(eligible))
+	runWalletActions(true, eligible, func(w *Wallet) {
+		spend := scaleWei(w.spendableWei(gasReserve), e.cfg.BuyFraction)
+		if spend.Sign() <= 0 {
+			return
+		}
+		w.txMu.Lock()
+		defer w.txMu.Unlock()
+		pr := pons.TxParams{Nonce: w.Nonce, GasLimit: buyGasLimit, TipCap: launchPr.TipCap, FeeCap: launchPr.FeeCap}
+		buyTx, err := w.Signer.BuildBuy(curve, spend, big.NewInt(0), true, pr)
+		if err != nil {
+			e.log.Warn("launch burst buy build failed", "wallet", w.Addr.Hex(), "err", err)
+			return
+		}
+		if err := e.pool.send(ctx, w, buyTx); err != nil {
+			e.log.Warn("launch burst buy send failed", "wallet", w.Addr.Hex(), "err", err)
+			return
+		}
+		mu.Lock()
+		out = append(out, launchBurstBuy{wallet: w, spend: spend, hash: buyTx.Hash()})
+		mu.Unlock()
+	})
+	e.log.Info("launch buy burst broadcast", "buys", len(out), "makers", len(eligible))
+	return out
 }
 
 // Bind attaches an already-launched token+pool (used by `mm` on an existing
