@@ -39,8 +39,10 @@ type Service struct {
 	mu          sync.RWMutex
 	root        context.Context
 	config      *configStore
+	funding     *fundingStore
 	vault       *vault.Store
 	jobs        map[string]*runningJob
+	fundingRuns map[string]context.CancelFunc
 	usedWallets map[string]string
 	logs        []LogEntry
 	logFile     *os.File
@@ -56,6 +58,10 @@ func NewService(dataDir string) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	funding, err := newFundingStore(filepath.Join(dataDir, "funding.json"))
+	if err != nil {
+		return nil, fmt.Errorf("load funding store: %w", err)
+	}
 	// Engine logs are mirrored to a plain-text file so errors survive an app
 	// restart and can be inspected outside the UI. Failure to open the file is
 	// not fatal; the in-memory log keeps working.
@@ -67,8 +73,10 @@ func NewService(dataDir string) (*Service, error) {
 	return &Service{
 		root:        context.Background(),
 		config:      config,
+		funding:     funding,
 		vault:       vault.New(filepath.Join(dataDir, "wallets.vault")),
 		jobs:        make(map[string]*runningJob),
+		fundingRuns: make(map[string]context.CancelFunc),
 		usedWallets: make(map[string]string),
 		logFile:     logFile,
 	}, nil
@@ -101,8 +109,9 @@ func (s *Service) Bootstrap() Bootstrap {
 	s.mu.RUnlock()
 	return Bootstrap{
 		Settings: settings, Strategies: strategies, Jobs: jobs, Logs: logs,
-		Vault: VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.vault.Summaries()},
-		Init:  init,
+		Vault:   VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.vault.Summaries()},
+		Init:    init,
+		Funding: s.FundingState(),
 	}
 }
 
@@ -360,6 +369,9 @@ func (s *Service) Shutdown() {
 		if job.active {
 			job.cancel()
 		}
+	}
+	for _, cancel := range s.fundingRuns {
+		cancel()
 	}
 	if s.logFile != nil {
 		s.logFile.Close()

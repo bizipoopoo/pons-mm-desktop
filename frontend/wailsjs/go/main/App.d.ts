@@ -5,15 +5,25 @@ import {vault} from '../models';
 
 export function Bootstrap():Promise<control.Bootstrap>;
 
+export function CreateFundingTask(arg1:string,arg2:string):Promise<control.FundingTask>;
+
 export function CreateVault(arg1:string):Promise<void>;
+
+export function DeleteFundingTask(arg1:string):Promise<void>;
 
 export function DeleteStrategy(arg1:string):Promise<void>;
 
 export function ExitStrategy(arg1:string,arg2:string):Promise<void>;
 
+export function ExportFundingBatches(arg1:string):Promise<string>;
+
 export function ExportGMGN(arg1:string):Promise<string>;
 
 export function FetchLatestLaunch():Promise<control.LaunchPreset>;
+
+export function FundingState():Promise<control.FundingState>;
+
+export function GenerateFundingWallets(arg1:string):Promise<string>;
 
 export function GenerateMnemonic():Promise<string>;
 
@@ -35,7 +45,13 @@ export function SaveSettings(arg1:control.Settings):Promise<void>;
 
 export function SaveStrategy(arg1:control.Strategy):Promise<control.Strategy>;
 
+export function SetFundingWithdrawCold(arg1:string):Promise<void>;
+
+export function StartFundingTask(arg1:string,arg2:string):Promise<void>;
+
 export function StartStrategy(arg1:string,arg2:string):Promise<void>;
+
+export function StopFundingTask(arg1:string):Promise<void>;
 
 export function StopStrategy(arg1:string):Promise<void>;
 

@@ -130,6 +130,28 @@ main { min-width: 0; display: flex; flex-direction: column; }
 .status-dot.running, .status-dot.starting { background: var(--green); box-shadow: 0 0 0 3px rgba(16, 185, 129, .14); }
 .status-dot.stopping, .status-dot.exiting { background: var(--amber); }
 .status-dot.error { background: var(--red); }
+.status-dot.done { background: var(--blue); }
+.status-dot.ready { background: var(--amber); }
+
+/* Fund routing */
+.funding-roles { display: grid; gap: 10px; }
+.funding-role { display: flex; align-items: center; gap: 13px; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface); }
+.funding-role.done { border-color: var(--green); background: var(--green-soft); }
+.funding-role-state { color: var(--subtle); display: grid; place-items: center; }
+.funding-role.done .funding-role-state { color: var(--green-strong); }
+.funding-role-text { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.funding-role-text strong { font-size: 13px; }
+.funding-role-text small { color: var(--muted); font-size: 11px; }
+.funding-role-text .mono { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.funding-role-action { flex: 0 0 auto; }
+.funding-cold-input { display: flex; gap: 8px; align-items: center; }
+.funding-cold-input input { width: 340px; max-width: 42vw; border: 1px solid var(--border-strong); border-radius: 8px; padding: 7px 10px; background: var(--surface); font-size: 12px; }
+.funding-route-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.funding-table .table-head, .funding-table .table-row { grid-template-columns: 1.3fr 1fr 1.4fr 1.2fr 130px; }
+.funding-progress { display: grid; gap: 5px; align-content: center; padding-right: 14px; }
+.funding-progress small { color: var(--muted); font-size: 11px; }
+.progress-track { height: 7px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 4px; background: var(--green); transition: width .3s ease; }
 .row-actions { display: flex; justify-content: flex-end; gap: 4px; }
 .row-actions button { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 7px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; }
 .row-actions button:hover { border-color: var(--border-strong); background: var(--surface); color: var(--text); }

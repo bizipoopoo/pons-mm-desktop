@@ -106,6 +106,78 @@ func (a *App) ResetStrategy(id string) (control.Strategy, error) { return a.serv
 // prefilling a strategy's token settings.
 func (a *App) FetchLatestLaunch() (control.LaunchPreset, error) { return a.service.FetchLatestLaunch() }
 
+// GenerateFundingWallets creates one funding wallet role (deposit cold,
+// deposit relays, or withdraw relays), stores the keys in the vault, and
+// forces a backup download before the generation is considered complete.
+func (a *App) GenerateFundingWallets(role string) (string, error) {
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save the funding wallet backup (required)",
+		DefaultFilename: control.FundingExportFilename(role),
+		Filters:         []runtime.FileFilter{{DisplayName: "JSON", Pattern: "*.json"}},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", errors.New("generation cancelled: the wallet backup download is required")
+	}
+	if filepath.Ext(path) == "" {
+		path += ".json"
+	}
+	export, err := a.service.GenerateFundingWallets(role)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(export.Payload), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (a *App) SetFundingWithdrawCold(address string) error {
+	return a.service.SetFundingWithdrawCold(address)
+}
+
+func (a *App) FundingState() control.FundingState { return a.service.FundingState() }
+
+func (a *App) CreateFundingTask(kind, input string) (control.FundingTask, error) {
+	return a.service.CreateFundingTask(kind, input)
+}
+
+// ExportFundingBatches downloads the five temporary batch mnemonics with the
+// derived per-slot addresses for one task.
+func (a *App) ExportFundingBatches(taskID string) (string, error) {
+	export, err := a.service.ExportFundingBatches(taskID)
+	if err != nil {
+		return "", err
+	}
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save the batch mnemonics",
+		DefaultFilename: export.Filename,
+		Filters:         []runtime.FileFilter{{DisplayName: "JSON", Pattern: "*.json"}},
+	})
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", errors.New("export cancelled")
+	}
+	if filepath.Ext(path) == "" {
+		path += ".json"
+	}
+	if err := os.WriteFile(path, []byte(export.Payload), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (a *App) StartFundingTask(id, confirmation string) error {
+	return a.service.StartFundingTask(id, confirmation)
+}
+
+func (a *App) StopFundingTask(id string) error   { return a.service.StopFundingTask(id) }
+func (a *App) DeleteFundingTask(id string) error { return a.service.DeleteFundingTask(id) }
+
 func (a *App) ExportGMGN(id string) (string, error) {
 	payload, err := a.service.GMGNImport(id)
 	if err != nil {

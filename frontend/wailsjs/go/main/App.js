@@ -6,8 +6,16 @@ export function Bootstrap() {
   return window['go']['main']['App']['Bootstrap']();
 }
 
+export function CreateFundingTask(arg1, arg2) {
+  return window['go']['main']['App']['CreateFundingTask'](arg1, arg2);
+}
+
 export function CreateVault(arg1) {
   return window['go']['main']['App']['CreateVault'](arg1);
+}
+
+export function DeleteFundingTask(arg1) {
+  return window['go']['main']['App']['DeleteFundingTask'](arg1);
 }
 
 export function DeleteStrategy(arg1) {
@@ -18,12 +26,24 @@ export function ExitStrategy(arg1, arg2) {
   return window['go']['main']['App']['ExitStrategy'](arg1, arg2);
 }
 
+export function ExportFundingBatches(arg1) {
+  return window['go']['main']['App']['ExportFundingBatches'](arg1);
+}
+
 export function ExportGMGN(arg1) {
   return window['go']['main']['App']['ExportGMGN'](arg1);
 }
 
 export function FetchLatestLaunch() {
   return window['go']['main']['App']['FetchLatestLaunch']();
+}
+
+export function FundingState() {
+  return window['go']['main']['App']['FundingState']();
+}
+
+export function GenerateFundingWallets(arg1) {
+  return window['go']['main']['App']['GenerateFundingWallets'](arg1);
 }
 
 export function GenerateMnemonic() {
@@ -66,8 +86,20 @@ export function SaveStrategy(arg1) {
   return window['go']['main']['App']['SaveStrategy'](arg1);
 }
 
+export function SetFundingWithdrawCold(arg1) {
+  return window['go']['main']['App']['SetFundingWithdrawCold'](arg1);
+}
+
+export function StartFundingTask(arg1, arg2) {
+  return window['go']['main']['App']['StartFundingTask'](arg1, arg2);
+}
+
 export function StartStrategy(arg1, arg2) {
   return window['go']['main']['App']['StartStrategy'](arg1, arg2);
+}
+
+export function StopFundingTask(arg1) {
+  return window['go']['main']['App']['StopFundingTask'](arg1);
 }
 
 export function StopStrategy(arg1) {

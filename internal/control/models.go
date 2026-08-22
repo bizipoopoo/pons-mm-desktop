@@ -221,10 +221,11 @@ type VaultState struct {
 }
 
 type Bootstrap struct {
-	Settings   Settings    `json:"settings"`
-	Strategies []Strategy  `json:"strategies"`
-	Jobs       []JobStatus `json:"jobs"`
-	Logs       []LogEntry  `json:"logs"`
-	Vault      VaultState  `json:"vault"`
-	Init       InitStatus  `json:"init"`
+	Settings   Settings     `json:"settings"`
+	Strategies []Strategy   `json:"strategies"`
+	Jobs       []JobStatus  `json:"jobs"`
+	Logs       []LogEntry   `json:"logs"`
+	Vault      VaultState   `json:"vault"`
+	Init       InitStatus   `json:"init"`
+	Funding    FundingState `json:"funding"`
 }

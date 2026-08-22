@@ -1,28 +1,30 @@
 import {useEffect, useMemo, useState} from 'react';
 import {
     Activity, AlertTriangle, BarChart3, Check, ChevronDown, ChevronUp, CircleDollarSign,
-    Copy, Download, Edit3, Eye, EyeOff, FileCheck2, Gauge, KeyRound, LayoutDashboard,
-    ListFilter, Lock, LockOpen, LogOut, Plus, Radio, RefreshCw, RotateCcw, Save,
-    Settings as SettingsIcon, ShieldCheck, Sparkles, Square, SquareTerminal, StopCircle,
+    Copy, Download, Edit3, Eye, EyeOff, FileCheck2, FileDown, Gauge, KeyRound, LayoutDashboard,
+    ListFilter, Lock, LockOpen, LogOut, Play, Plus, Radio, RefreshCw, RotateCcw, Save,
+    Settings as SettingsIcon, ShieldCheck, Shuffle, Sparkles, Square, SquareTerminal, StopCircle,
     Trash2, Upload, WalletCards, X,
 } from 'lucide-react';
 import {
-    Bootstrap, CreateVault, DeleteStrategy, ExitStrategy, ExportGMGN, FetchLatestLaunch,
-    GenerateMnemonic, ImportMnemonic, ImportPrivateKeys, LockVault, NewStrategy,
-    PreflightStrategy, ResetStrategy, RunInitCheck, SaveSettings, SaveStrategy,
-    StartStrategy, StopStrategy, UnlockVault,
+    Bootstrap, CreateFundingTask, CreateVault, DeleteFundingTask, DeleteStrategy, ExitStrategy,
+    ExportFundingBatches, ExportGMGN, FetchLatestLaunch, GenerateFundingWallets, GenerateMnemonic,
+    ImportMnemonic, ImportPrivateKeys, LockVault, NewStrategy, PreflightStrategy, ResetStrategy,
+    RunInitCheck, SaveSettings, SaveStrategy, SetFundingWithdrawCold, StartFundingTask,
+    StartStrategy, StopFundingTask, StopStrategy, UnlockVault,
 } from '../wailsjs/go/main/App';
 import {control, vault} from '../wailsjs/go/models';
 import {EventsOn} from '../wailsjs/runtime/runtime';
 import './App.css';
 
-type Page = 'overview' | 'strategies' | 'wallets' | 'logs' | 'settings';
+type Page = 'overview' | 'strategies' | 'funding' | 'wallets' | 'logs' | 'settings';
 type Toast = {kind: 'success' | 'error' | 'info'; text: string};
 
 const short = (value = '') => value.length > 15 ? `${value.slice(0, 7)}...${value.slice(-5)}` : value || '-';
 const isActive = (state?: string) => ['starting', 'running', 'stopping', 'exiting'].includes(state || '');
 const stateLabel: Record<string, string> = {
     starting: 'Starting', running: 'Running', stopping: 'Stopping', exiting: 'Exiting', stopped: 'Stopped', error: 'Error',
+    ready: 'Ready', done: 'Done',
 };
 
 function App() {
@@ -55,6 +57,9 @@ function App() {
             EventsOn('strategy-log', (entry: control.LogEntry) => setData(prev => prev ? ({...prev, logs: [...(prev.logs || []), entry].slice(-800)}) as control.Bootstrap : prev)),
             EventsOn('vault-updated', (state: control.VaultState) => setData(prev => prev ? ({...prev, vault: state}) as control.Bootstrap : prev)),
             EventsOn('init-updated', (init: control.InitStatus) => setData(prev => prev ? ({...prev, init}) as control.Bootstrap : prev)),
+            EventsOn('funding-updated', (funding: control.FundingState) => setData(prev => prev ? ({...prev, funding}) as control.Bootstrap : prev)),
+            EventsOn('funding-task-updated', (task: control.FundingTask) => setData(prev => prev ? ({...prev, funding: {...prev.funding, tasks: upsert(prev.funding?.tasks || [], task, 'id')}}) as control.Bootstrap : prev)),
+            EventsOn('funding-task-deleted', (id: string) => setData(prev => prev ? ({...prev, funding: {...prev.funding, tasks: (prev.funding?.tasks || []).filter(t => t.id !== id)}}) as control.Bootstrap : prev)),
             EventsOn('config-updated', reload),
         ];
         return () => unsubscribers.forEach(unsub => unsub());
@@ -101,6 +106,7 @@ function App() {
     const nav: {id: Page; label: string; icon: typeof Activity}[] = [
         {id: 'overview', label: 'Overview', icon: LayoutDashboard},
         {id: 'strategies', label: 'Strategies', icon: Radio},
+        {id: 'funding', label: 'Fund routing', icon: Shuffle},
         {id: 'wallets', label: 'Wallet vault', icon: WalletCards},
         {id: 'logs', label: 'Activity logs', icon: SquareTerminal},
         {id: 'settings', label: 'Settings', icon: SettingsIcon},
@@ -135,9 +141,10 @@ function App() {
             <div className="content">
                 {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget}/>}
                 {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} onReset={setResetTarget} notify={notify}/>}
+                {page === 'funding' && <FundingPage state={data.funding} vaultUnlocked={data.vault.unlocked} notify={notify} onNavigate={setPage}/>}
                 {page === 'wallets' && <WalletVault state={data.vault} notify={notify}/>}
                 {page === 'logs' && <Logs logs={data.logs || []} strategies={data.strategies || []}/>}
-                {page === 'settings' && <SettingsPage initial={data.settings} notify={notify}/>}
+                {page === 'settings' && <SettingsPage initial={data.settings} funding={data.funding} vaultUnlocked={data.vault.unlocked} notify={notify}/>}
             </div>
         </main>
 
@@ -401,13 +408,185 @@ function Logs({logs, strategies}: {logs: control.LogEntry[]; strategies: control
     return <section className="section-block full-height logs-section"><div className="section-heading"><div><h2>Engine activity</h2><p>Bounded in-memory log; secrets are never included.</p></div><div className="log-filters"><select value={level} onChange={e => setLevel(e.target.value)}><option value="all">All levels</option><option value="info">Info</option><option value="warn">Warn</option><option value="error">Error</option></select><input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter logs"/></div></div><div className="log-console">{shown.map((log, i) => <div className="log-row" key={`${log.at}-${i}`}><time>{new Date(log.at).toLocaleTimeString()}</time><span className={`log-level ${log.level}`}>{log.level}</span><span className="log-source">{names.get(log.strategyId) || short(log.strategyId)}</span><p>{log.message}</p></div>)}{!shown.length && <Empty text="No matching log entries"/>}</div></section>;
 }
 
-function SettingsPage({initial, notify}: {initial: control.Settings; notify: (k: Toast['kind'], t: string) => void}) {
+function SettingsPage({initial, funding, vaultUnlocked, notify}: {
+    initial: control.Settings; funding: control.FundingState; vaultUnlocked: boolean; notify: (k: Toast['kind'], t: string) => void;
+}) {
     const [settings, setSettings] = useState<any>(() => ({...initial})); const [showRPC, setShowRPC] = useState(false); const [saving, setSaving] = useState(false);
     const save = async () => { setSaving(true); try { await SaveSettings(new control.Settings(settings)); notify('success', 'Settings saved'); } catch (e) { notify('error', String(e)); } finally { setSaving(false); } };
     return <section className="settings-layout"><div className="section-block"><div className="section-heading"><div><h2>Network</h2><p>Shared defaults for all configured pairs.</p></div></div><Field label="Robinhood Chain RPC"><div className="password-input"><input className="mono" type={showRPC ? 'text' : 'password'} value={settings.rpcEndpoint || ''} onChange={e => setSettings({...settings, rpcEndpoint: e.target.value})} placeholder="wss://..."/><button title={showRPC ? 'Hide endpoint' : 'Reveal endpoint'} onClick={() => setShowRPC(!showRPC)}>{showRPC ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></Field><div className="inline-note"><Gauge size={17}/><span>WebSocket endpoints enable event-driven pool monitoring. HTTPS falls back to polling.</span></div></div>
         <div className="section-block"><div className="section-heading"><div><h2>GMGN viewer</h2><p>Optional account used when manually importing generated wallet tags.</p></div></div><Field label="Viewer wallet address"><input className="mono" value={settings.gmgnViewerWallet || ''} onChange={e => setSettings({...settings, gmgnViewerWallet: e.target.value})} placeholder="0x..."/></Field></div>
         <div className="settings-actions"><button className="primary" disabled={saving} onClick={save}><Save size={16}/>{saving ? 'Saving' : 'Save settings'}</button></div>
+        <FundingSettings config={funding?.config} vaultUnlocked={vaultUnlocked} notify={notify}/>
     </section>;
+}
+
+function fundingConfigured(config?: control.FundingConfig) {
+    return Boolean(config?.depositCold && (config?.depositRelays?.length || 0) === 10 && (config?.withdrawRelays?.length || 0) === 10 && config?.withdrawCold);
+}
+
+function FundingSettings({config, vaultUnlocked, notify}: {config?: control.FundingConfig; vaultUnlocked: boolean; notify: (k: Toast['kind'], t: string) => void}) {
+    const [busy, setBusy] = useState('');
+    const [coldAddr, setColdAddr] = useState('');
+    const generate = async (role: string) => {
+        setBusy(role);
+        try { const path = await GenerateFundingWallets(role); notify('success', `Generated and backed up to ${path}`); }
+        catch (e) { if (!String(e).includes('cancelled')) notify('error', String(e)); }
+        finally { setBusy(''); }
+    };
+    const saveCold = async () => {
+        setBusy('withdraw-cold');
+        try { await SetFundingWithdrawCold(coldAddr); notify('success', 'Withdraw cold address saved'); setColdAddr(''); }
+        catch (e) { notify('error', String(e)); }
+        finally { setBusy(''); }
+    };
+    return <div className="section-block"><div className="section-heading"><div><h2>Fund routing wallets</h2><p>Fixed once configured. Generated keys are encrypted in the vault; a backup download is mandatory.</p></div></div>
+        {!vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the wallet vault before generating routing wallets.</span></div>}
+        <div className="funding-roles">
+            <FundingRole label="Deposit cold wallet" hint="Receives the money you want to distribute" done={Boolean(config?.depositCold)}
+                detail={config?.depositCold ? config.depositCold.address : 'Not configured'}
+                action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'deposit-cold'} onClick={() => generate('deposit-cold')}><KeyRound size={14}/> Generate</button>}/>
+            <FundingRole label="Deposit relay wallets" hint="10 intermediaries between the cold wallet and batch 1" done={(config?.depositRelays?.length || 0) === 10}
+                detail={(config?.depositRelays?.length || 0) === 10 ? `10 wallets · ${short(config!.depositRelays![0].address)} …` : 'Not configured'}
+                action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'deposit-relays'} onClick={() => generate('deposit-relays')}><KeyRound size={14}/> Generate 10</button>}/>
+            <FundingRole label="Withdraw relay wallets" hint="10 intermediaries that gather funds before the final payout" done={(config?.withdrawRelays?.length || 0) === 10}
+                detail={(config?.withdrawRelays?.length || 0) === 10 ? `10 wallets · ${short(config!.withdrawRelays![0].address)} …` : 'Not configured'}
+                action={<button className="secondary small" disabled={!vaultUnlocked || busy === 'withdraw-relays'} onClick={() => generate('withdraw-relays')}><KeyRound size={14}/> Generate 10</button>}/>
+            <FundingRole label="Withdraw cold wallet" hint="Address only — its key is never stored here" done={Boolean(config?.withdrawCold)}
+                detail={config?.withdrawCold || 'Not configured'}
+                action={!config?.withdrawCold ? <div className="funding-cold-input"><input className="mono" value={coldAddr} onChange={e => setColdAddr(e.target.value)} placeholder="0x..."/><button className="secondary small" disabled={!coldAddr.trim() || busy === 'withdraw-cold'} onClick={saveCold}><Save size={14}/> Save</button></div> : null}/>
+        </div>
+        {fundingConfigured(config) && <div className="inline-note"><ShieldCheck size={17}/><span>All routing wallets are configured. Distribution and withdrawal tasks are available on the Fund routing page.</span></div>}
+    </div>;
+}
+
+function FundingRole({label, hint, detail, done, action}: {label: string; hint: string; detail: string; done: boolean; action: React.ReactNode}) {
+    return <div className={`funding-role ${done ? 'done' : ''}`}>
+        <span className="funding-role-state">{done ? <Check size={16}/> : <Square size={16}/>}</span>
+        <div className="funding-role-text"><strong>{label}</strong><small>{hint}</small><span className="mono">{detail}</span></div>
+        {!done && <div className="funding-role-action">{action}</div>}
+    </div>;
+}
+
+function FundingPage({state, vaultUnlocked, notify, onNavigate}: {
+    state: control.FundingState; vaultUnlocked: boolean; notify: (k: Toast['kind'], t: string) => void; onNavigate: (p: Page) => void;
+}) {
+    const [creating, setCreating] = useState(false);
+    const [startTarget, setStartTarget] = useState<control.FundingTask | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<control.FundingTask | null>(null);
+    const [busy, setBusy] = useState('');
+    const configured = fundingConfigured(state?.config);
+    const tasks = state?.tasks || [];
+
+    const exportBatches = async (task: control.FundingTask) => {
+        try { const path = await ExportFundingBatches(task.id); notify('success', `Batch mnemonics saved to ${path}`); }
+        catch (e) { if (!String(e).includes('cancelled')) notify('error', String(e)); }
+    };
+    const stop = async (task: control.FundingTask) => {
+        setBusy(`stop:${task.id}`);
+        try { await StopFundingTask(task.id); notify('info', 'Stop requested; the current hop finishes safely'); }
+        catch (e) { notify('error', String(e)); }
+        finally { setBusy(''); }
+    };
+    const remove = async (task: control.FundingTask) => {
+        setBusy(`delete:${task.id}`);
+        try { await DeleteFundingTask(task.id); notify('success', 'Task deleted'); setDeleteTarget(null); }
+        catch (e) { notify('error', String(e)); }
+        finally { setBusy(''); }
+    };
+
+    if (!configured) return <section className="section-block full-height"><div className="section-heading"><div><h2>Fund routing</h2><p>Distribute or withdraw native coin through 5 relay batches.</p></div></div>
+        <Empty text="Configure the deposit/withdraw routing wallets first" action={<button className="secondary" onClick={() => onNavigate('settings')}><SettingsIcon size={16}/> Open Settings</button>}/>
+    </section>;
+
+    return <section className="section-block full-height">
+        <div className="section-heading"><div><h2>Routing tasks</h2><p>Distribute: cold → 10 relays → 5 batches → targets. Withdraw: sources → 5 batches → 10 relays → cold. Restarting a stopped task continues from the current chain state.</p></div>
+            <button className="primary" onClick={() => setCreating(true)}><Plus size={16}/> New task</button></div>
+        <div className="funding-route-summary">
+            <span className="mode-tag">Deposit cold {short(state.config?.depositCold?.address)}</span>
+            <span className="mode-tag">10 deposit relays</span>
+            <span className="mode-tag">10 withdraw relays</span>
+            <span className="mode-tag">Withdraw cold {short(state.config?.withdrawCold)}</span>
+        </div>
+        <div className="data-table funding-table">
+            <div className="table-head"><span>Task</span><span>Wallets</span><span>Progress</span><span>Status</span><span>Actions</span></div>
+            {tasks.map(task => {
+                const running = task.state === 'running';
+                const pct = task.transfersTotal ? Math.round(100 * (task.transfersDone || 0) / task.transfersTotal) : 0;
+                return <div className="table-row" key={task.id}>
+                    <div className="name-cell"><span className="pair-icon">{task.kind === 'distribute' ? 'DN' : 'UP'}</span><div><strong>{task.kind === 'distribute' ? 'Distribute' : 'Withdraw'}</strong><small>{new Date(task.createdAt).toLocaleString()}</small></div></div>
+                    <div><strong>{task.targets?.length || 0}</strong><small>{task.kind === 'distribute' ? 'target wallets' : 'source wallets'} · 5×{task.targets?.length || 0} temp</small></div>
+                    <div className="funding-progress"><div className="progress-track"><div className="progress-fill" style={{width: `${pct}%`}}/></div><small>{task.transfersDone || 0}/{task.transfersTotal || 0} transfers · hop {task.hopsDone || 0}/{task.hopsTotal || 0}</small></div>
+                    <Status state={task.state} message={task.message}/>
+                    <div className="row-actions">
+                        <button title="Download the 5 batch mnemonics" onClick={() => exportBatches(task)}><FileDown size={16}/></button>
+                        {running ? <button className="danger-icon" title="Stop after the current transfers confirm" disabled={busy === `stop:${task.id}`} onClick={() => stop(task)}><StopCircle size={16}/></button>
+                            : <button className="start-icon" title={task.state === 'done' ? 'Completed — start re-checks and moves any remaining balance' : 'Start'} disabled={!vaultUnlocked} onClick={() => setStartTarget(task)}><Play size={16}/></button>}
+                        <button title="Delete" disabled={running} onClick={() => setDeleteTarget(task)}><Trash2 size={16}/></button>
+                    </div>
+                </div>;
+            })}
+            {!tasks.length && <Empty text="No routing tasks yet" action={<button className="secondary" onClick={() => setCreating(true)}><Plus size={16}/> Create task</button>}/>}
+        </div>
+        {!vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the wallet vault to start tasks; every hop signs transactions.</span></div>}
+        {creating && <FundingTaskDialog vaultUnlocked={vaultUnlocked} onClose={() => setCreating(false)} notify={notify} onCreated={task => { setCreating(false); notify('success', 'Task created — download the batch mnemonics before starting'); void exportBatches(task); }}/>}
+        {startTarget && <FundingStartDialog task={startTarget} busy={busy === `start:${startTarget.id}`} onClose={() => setStartTarget(null)} onConfirm={async () => {
+            setBusy(`start:${startTarget.id}`);
+            try { await StartFundingTask(startTarget.id, 'SEND'); notify('success', 'Routing task started'); setStartTarget(null); }
+            catch (e) { notify('error', String(e)); }
+            finally { setBusy(''); }
+        }}/>}
+        {deleteTarget && <ConfirmDialog title="Delete routing task" subtitle={deleteTarget.kind === 'distribute' ? 'Distribute' : 'Withdraw'}
+            message="The task record and its batch mnemonics are removed from this app. Make sure the batch mnemonics are downloaded if any temporary wallet could still hold funds."
+            confirmLabel="Delete" busy={busy === `delete:${deleteTarget.id}`}
+            onClose={() => setDeleteTarget(null)} onConfirm={() => remove(deleteTarget)}/>}
+    </section>;
+}
+
+function FundingTaskDialog({vaultUnlocked, onClose, onCreated, notify}: {
+    vaultUnlocked: boolean; onClose: () => void; onCreated: (t: control.FundingTask) => void; notify: (k: Toast['kind'], t: string) => void;
+}) {
+    const [kind, setKind] = useState<'distribute' | 'withdraw'>('distribute');
+    const [input, setInput] = useState('');
+    const [saving, setSaving] = useState(false);
+    const lines = input.split(/[\s,;]+/).filter(Boolean).length;
+    const create = async () => {
+        setSaving(true);
+        try { onCreated(await CreateFundingTask(kind, input)); }
+        catch (e) { notify('error', String(e)); }
+        finally { setSaving(false); }
+    };
+    return <Modal title="New routing task" subtitle="5 temporary relay batches are generated per task; every slot follows one fixed path." onClose={onClose} wide>
+        <div className="dialog-body"><div className="form-stack">
+            <Field label="Direction"><div className="segmented">
+                <button className={kind === 'distribute' ? 'active' : ''} onClick={() => setKind('distribute')}>Distribute · cold → targets</button>
+                <button className={kind === 'withdraw' ? 'active' : ''} onClick={() => setKind('withdraw')}>Withdraw · sources → cold</button>
+            </div></Field>
+            {kind === 'distribute'
+                ? <div className="inline-note"><Gauge size={17}/><span>Fund the deposit cold wallet first. Its full spendable balance is split randomly but near-evenly across the 10 relays, then into batch 1, then forwarded 1:1 through batches 2-5 to your target addresses.</span></div>
+                : <div className="inline-note"><Gauge size={17}/><span>Each source wallet moves its full balance 1:1 through batches 1-5, then the last batch gathers into the 10 withdraw relays, which pay the withdraw cold address. Sources must sign, so paste their private keys (or addresses already in the vault).</span></div>}
+            <Field label={kind === 'distribute' ? `Target addresses (${lines})` : `Source private keys or vault addresses (${lines})`}>
+                <textarea className={kind === 'withdraw' ? 'secret-area' : 'mono'} rows={9} value={input} onChange={e => setInput(e.target.value)}
+                    placeholder={kind === 'distribute' ? 'One destination address per line (up to 500)' : 'One private key per line; addresses are accepted for wallets already in the vault'}/>
+            </Field>
+            {kind === 'withdraw' && !vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the vault first: source keys are encrypted into it.</span></div>}
+        </div></div>
+        <div className="dialog-footer"><button className="secondary" onClick={onClose}>Cancel</button>
+            <button className="primary" disabled={saving || !input.trim() || (kind === 'withdraw' && !vaultUnlocked)} onClick={create}><Plus size={16}/>{saving ? 'Creating' : 'Create task'}</button></div>
+    </Modal>;
+}
+
+function FundingStartDialog({task, busy, onClose, onConfirm}: {task: control.FundingTask; busy: boolean; onClose: () => void; onConfirm: () => void}) {
+    const [phrase, setPhrase] = useState('');
+    return <Modal title={task.kind === 'distribute' ? 'Start distribution' : 'Start withdrawal'} subtitle={`${task.targets?.length || 0} wallets · ${task.transfersTotal} transfers`} onClose={busy ? () => {} : onClose}>
+        <div className="risk-box"><AlertTriangle size={20}/><div><strong>This moves real native coin</strong>
+            <p>{task.kind === 'distribute'
+                ? 'The deposit cold wallet\'s full spendable balance is routed through the relays and 5 temporary batches to the target addresses. Each hop pays its own gas from the carried funds.'
+                : 'Every source wallet\'s full balance is routed through 5 temporary batches and the withdraw relays to the withdraw cold address. Each hop pays its own gas from the carried funds.'}</p>
+            <p>Download the batch mnemonics first — they are the only way to recover funds from the temporary wallets outside this app.</p></div></div>
+        <Field label="Type SEND to confirm"><input autoFocus disabled={busy} value={phrase} onChange={e => setPhrase(e.target.value.toUpperCase())}/></Field>
+        <div className="dialog-footer"><button className="secondary" disabled={busy} onClick={onClose}>Cancel</button>
+            <button className="danger" disabled={busy || phrase !== 'SEND'} onClick={onConfirm}><Play size={16}/>{busy ? 'Starting' : 'Start routing'}</button></div>
+    </Modal>;
 }
 
 function LiveDialog({strategy, onClose, onConfirm}: {strategy: control.Strategy; onClose: () => void; onConfirm: () => void}) {
@@ -478,7 +657,7 @@ function upsert<T extends Record<string, any>>(items: T[], value: T, key: keyof 
 }
 
 function pageSubtitle(page: Page) {
-    return ({overview: 'Live state across all market-making pairs', strategies: 'Configure and run independent token pairs', wallets: 'Encrypted local signing accounts', logs: 'Execution and monitor events', settings: 'Network and integration defaults'})[page];
+    return ({overview: 'Live state across all market-making pairs', strategies: 'Configure and run independent token pairs', funding: 'Route native coin through relay batches to many wallets', wallets: 'Encrypted local signing accounts', logs: 'Execution and monitor events', settings: 'Network and integration defaults'})[page];
 }
 
 export default App;
