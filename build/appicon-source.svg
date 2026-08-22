@@ -1,33 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="background" x1="154" y1="118" x2="866" y2="914" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#182127"/>
-      <stop offset="0.55" stop-color="#111719"/>
-      <stop offset="1" stop-color="#0A1012"/>
-    </linearGradient>
-    <linearGradient id="mark" x1="290" y1="764" x2="774" y2="260" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#45D291"/>
-      <stop offset="0.52" stop-color="#57D8B1"/>
-      <stop offset="1" stop-color="#68A8F8"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(735 270) rotate(132) scale(510)">
-      <stop stop-color="#68A8F8" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#68A8F8" stop-opacity="0"/>
-    </radialGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="26" stdDeviation="32" flood-color="#000000" flood-opacity="0.42"/>
-    </filter>
-  </defs>
-
-  <rect x="56" y="56" width="912" height="912" rx="226" fill="url(#background)" filter="url(#shadow)"/>
-  <rect x="57.5" y="57.5" width="909" height="909" rx="224.5" fill="url(#glow)" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
-
-  <!-- A compact P-shaped bridge: the outer stroke is the desk/bridge, while
-       the inner rising line represents a bonding curve and live market flow. -->
-  <path d="M318 758V278H548C682 278 770 358 770 474C770 590 682 672 548 672H318"
-        fill="none" stroke="url(#mark)" stroke-width="82" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M424 531C470 438 528 398 598 398C655 398 703 426 738 479"
-        fill="none" stroke="#E8B958" stroke-width="34" stroke-linecap="round"/>
-  <circle cx="424" cy="531" r="20" fill="#E8B958"/>
-  <circle cx="738" cy="479" r="20" fill="#E8B958"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="236" fill="#0C9D6E"/>
+  <!-- Pons: a flat bridge arch spanning the market below. -->
+  <path d="M212 520 C 300 280 724 280 812 520" fill="none" stroke="#FFFFFF" stroke-width="78" stroke-linecap="round"/>
+  <!-- Rising maker bars beneath the bridge, echoing the pumpmm bar family. -->
+  <rect x="272" y="640" width="124" height="168" rx="62" fill="#FFFFFF" opacity="0.5"/>
+  <rect x="450" y="576" width="124" height="232" rx="62" fill="#FFFFFF" opacity="0.75"/>
+  <rect x="628" y="512" width="124" height="296" rx="62" fill="#FFFFFF"/>
+  <circle cx="744" cy="204" r="52" fill="#B7F5DE"/>
 </svg>
