@@ -196,9 +196,33 @@ func (p *Pool) IsOurs(addr common.Address) bool {
 	return ok
 }
 
+// forEachWallet runs fn for every wallet concurrently and returns the first
+// error. Serial per-wallet RPC round trips used to cost 1-2s each; with ten
+// wallets that added tens of seconds between a launch and the monitor loop
+// starting — a window where retail trades went unanswered.
+func (p *Pool) forEachWallet(fn func(w *Wallet) error) error {
+	wallets := p.All()
+	errs := make([]error, len(wallets))
+	var wg sync.WaitGroup
+	for i, w := range wallets {
+		wg.Add(1)
+		go func(i int, w *Wallet) {
+			defer wg.Done()
+			errs[i] = fn(w)
+		}(i, w)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RefreshETH reads every wallet's native balance and pending nonce.
 func (p *Pool) RefreshETH(ctx context.Context) error {
-	for _, w := range p.All() {
+	return p.forEachWallet(func(w *Wallet) error {
 		bal, err := p.Client.EthBalance(ctx, w.Addr)
 		if err != nil {
 			return fmt.Errorf("balance %s: %w", w.Addr.Hex(), err)
@@ -209,20 +233,20 @@ func (p *Pool) RefreshETH(ctx context.Context) error {
 			return fmt.Errorf("nonce %s: %w", w.Addr.Hex(), err)
 		}
 		w.Nonce = n
-	}
-	return nil
+		return nil
+	})
 }
 
 // RefreshToken reads every wallet's launch-token balance.
 func (p *Pool) RefreshToken(ctx context.Context, token common.Address) error {
-	for _, w := range p.All() {
+	return p.forEachWallet(func(w *Wallet) error {
 		bal, err := p.Client.TokenBalance(ctx, token, w.Addr)
 		if err != nil {
 			return fmt.Errorf("token balance %s: %w", w.Addr.Hex(), err)
 		}
 		w.setTokenBalance(bal)
-	}
-	return nil
+		return nil
+	})
 }
 
 // totalETH sums the cached native balances across all wallets.

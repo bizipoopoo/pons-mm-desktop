@@ -437,10 +437,14 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		e.addPendingBuy()
 		// Queue the sell approval right behind the buy by nonce, mirroring the
 		// normal buy path, so an instant retail response can sell immediately.
-		if err := e.ensureApprove(ctx, b.wallet, big.NewInt(1), false); err != nil {
-			e.log.Warn("sell approval prewarm after burst buy failed", "wallet", b.wallet.Addr.Hex(), "err", err)
-		}
-		go e.settleBuy(ctx, b.wallet, b.spend, big.NewInt(0), b.hash)
+		// Both run off the launch path: approving nine wallets serially used to
+		// hold up Run() — and with it the trade monitor — for over ten seconds.
+		go func(b launchBurstBuy) {
+			if err := e.ensureApprove(ctx, b.wallet, big.NewInt(1), false); err != nil {
+				e.log.Warn("sell approval prewarm after burst buy failed", "wallet", b.wallet.Addr.Hex(), "err", err)
+			}
+			e.settleBuy(ctx, b.wallet, b.spend, big.NewInt(0), b.hash)
+		}(b)
 	}
 	return nil
 }
@@ -572,6 +576,20 @@ func (e *Engine) Run(ctx context.Context) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	ctx = runCtx
+
+	// The monitor starts before anything else: every second it is down is a
+	// second a sniper can trade unseen. Detected trades queue on the Retail
+	// channel until the event loop below starts draining them.
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		e.monitor.Run(ctx)
+	}()
+	defer func() {
+		cancelRun()
+		<-monitorDone
+	}()
+
 	if err := e.pool.RefreshETH(ctx); err != nil {
 		return err
 	}
@@ -586,22 +604,16 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.seedMonitorFromBalances(ctx)
 
-	monitorDone := make(chan struct{})
-	approvalDone := make(chan struct{})
-	go func() {
-		defer close(monitorDone)
-		e.monitor.Run(ctx)
-	}()
 	// Approval warming must not block the event loop. A sell can be queued behind
 	// an already-submitted approval by nonce, so confirmation is not required on
 	// the latency-sensitive path.
+	approvalDone := make(chan struct{})
 	go func() {
 		defer close(approvalDone)
 		e.prepareExistingSellApprovals(ctx)
 	}()
 	defer func() {
 		cancelRun()
-		<-monitorDone
 		<-approvalDone
 	}()
 
@@ -616,6 +628,19 @@ func (e *Engine) Run(ctx context.Context) error {
 		"token", e.token.Hex(), "pool", e.poolAddr.Hex(), "state", e.state.String())
 
 	for {
+		// Retail trades decide state transitions and time the exits; a burst of
+		// queued buy settlements must never starve them, so drain the retail
+		// channel first on every iteration.
+		select {
+		case ev := <-e.monitor.Retail:
+			e.onRetail(ctx, ev)
+			if e.state == Done {
+				e.log.Info("state machine reached Done; exiting")
+				return nil
+			}
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			e.interruptBuys()
