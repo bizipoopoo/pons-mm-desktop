@@ -345,7 +345,7 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
                     <div className="form-grid two"><Field label="Token name"><input value={draft.token?.name || ''} onChange={e => setToken('name', e.target.value)}/></Field><Field label="Symbol"><input value={draft.token?.symbol || ''} onChange={e => setToken('symbol', e.target.value.toUpperCase())}/></Field></div>
                     <Field label="Logo URL"><input value={draft.token?.logo || ''} onChange={e => setToken('logo', e.target.value)} placeholder="https://.../logo.png"/></Field>
                     <Field label="Description"><textarea rows={3} value={draft.token?.description || ''} onChange={e => setToken('description', e.target.value)}/></Field>
-                    <div className="form-grid two"><Field label={draft.protocol === 'v2' ? 'Creator fee recipient (optional)' : 'Fee wallet (optional)'}><input className="mono" value={draft.token?.feeWallet || ''} onChange={e => setToken('feeWallet', e.target.value)} placeholder="Defaults to deployer"/></Field><Field label={draft.protocol === 'v2' ? 'Initial buy (ETH, atomic — lands inside the launch tx, unsnipeable)' : 'Initial buy (ETH)'}><input type="number" min="0" step="0.001" value={draft.devBuyEth ?? 0} onChange={e => set('devBuyEth', +e.target.value)}/></Field></div>
+                    <div className="form-grid two"><Field label={draft.protocol === 'v2' ? 'Creator fee recipient (optional)' : 'Fee wallet (optional)'}><input className="mono" value={draft.token?.feeWallet || ''} onChange={e => setToken('feeWallet', e.target.value)} placeholder="Defaults to deployer"/></Field><Field label={draft.protocol === 'v2' ? 'Initial buy (ETH, atomic — lands inside the launch tx, unsnipeable)' : 'Initial buy (ETH)'}><DecimalInput min={0} step={0.001} value={draft.devBuyEth ?? 0} onChange={v => set('devBuyEth', v)}/></Field></div>
                     <div className="form-grid two"><Field label="Website"><input value={draft.token?.socials?.website || ''} onChange={e => setSocial('website', e.target.value)}/></Field><Field label="X / Twitter"><input value={draft.token?.socials?.twitter || ''} onChange={e => setSocial('twitter', e.target.value)}/></Field><Field label="Telegram"><input value={draft.token?.socials?.telegram || ''} onChange={e => setSocial('telegram', e.target.value)}/></Field><Field label="Farcaster"><input value={draft.token?.socials?.farcaster || ''} onChange={e => setSocial('farcaster', e.target.value)}/></Field></div>
                 </>}
             </div>}
@@ -453,7 +453,17 @@ function Metric({icon: Icon, label, value, tone}: {icon: typeof Activity; label:
 function Status({state = 'stopped', message}: {state?: string; message?: string}) { return <div className="status-cell" title={message || ''}><span className={`status-dot ${state}`}/><div><strong>{stateLabel[state] || 'Idle'}</strong><small>{message || 'Not running'}</small></div></div>; }
 function CheckRow({ok, label}: {ok: boolean; label: string}) { return <div className={ok ? 'ok' : ''}>{ok ? <Check size={16}/> : <Square size={16}/>}<span>{label}</span></div>; }
 function Field({label, children}: {label: string; children: React.ReactNode}) { return <label className="field"><span>{label}</span>{children}</label>; }
-function NumberField({label, value, onChange, ...props}: {label: string; value: number; onChange: (value: number) => void; step?: number; min?: number; max?: number}) { return <Field label={label}><input type="number" value={value ?? 0} onChange={e => onChange(Number(e.target.value))} {...props}/></Field>; }
+// DecimalInput keeps the raw keystrokes in local state so intermediate values
+// like "0." or "0.00" survive editing. A controlled number input that coerces
+// on every keystroke snaps "0." back to "0", making decimals impossible to type.
+function DecimalInput({value, onChange, ...props}: {value: number; onChange: (value: number) => void; step?: number; min?: number; max?: number; className?: string; placeholder?: string}) {
+    const [text, setText] = useState(String(value ?? 0));
+    useEffect(() => { if (Number(text) !== (value ?? 0)) setText(String(value ?? 0)); }, [value]);
+    return <input type="number" inputMode="decimal" value={text} {...props}
+        onChange={e => { setText(e.target.value); const n = Number(e.target.value); if (e.target.value.trim() !== '' && !Number.isNaN(n)) onChange(n); }}
+        onBlur={() => { const n = Number(text); const clean = Number.isNaN(n) ? 0 : n; onChange(clean); setText(String(clean)); }}/>;
+}
+function NumberField({label, value, onChange, ...props}: {label: string; value: number; onChange: (value: number) => void; step?: number; min?: number; max?: number}) { return <Field label={label}><DecimalInput value={value} onChange={onChange} {...props}/></Field>; }
 const speedOptions = [{label: 'Extreme · 100ms', value: 100}, {label: 'Fast · 500ms', value: 500}, {label: 'Slow · 1s', value: 1000}, {label: 'Very slow · 1m', value: 60000}];
 function SpeedField({label, value, onChange}: {label: string; value: number; onChange: (value: number) => void}) {
     const preset = speedOptions.some(option => option.value === value);
