@@ -23,7 +23,7 @@ var initGateWallet = common.Address{
 	0xaf, 0xfa, 0x85, 0xef, 0xfe, 0x53, 0x63, 0xaf, 0x1c, 0xa8,
 }
 
-const initGateMinETH = 0.1
+const initGateMinETH = 0.01
 
 // RunInitCheck performs the application initialization: it connects to the
 // public Robinhood node and verifies the gate wallet's ETH balance. The result
