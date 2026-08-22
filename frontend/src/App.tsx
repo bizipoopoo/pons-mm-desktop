@@ -141,7 +141,7 @@ function App() {
             <div className="content">
                 {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget}/>}
                 {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} onReset={setResetTarget} notify={notify}/>}
-                {page === 'funding' && <FundingPage state={data.funding} vaultUnlocked={data.vault.unlocked} notify={notify} onNavigate={setPage}/>}
+                {page === 'funding' && <FundingPage state={data.funding} vaultUnlocked={data.vault.unlocked} wallets={data.vault.wallets || []} notify={notify} onNavigate={setPage}/>}
                 {page === 'wallets' && <WalletVault state={data.vault} notify={notify}/>}
                 {page === 'logs' && <Logs logs={data.logs || []} strategies={data.strategies || []}/>}
                 {page === 'settings' && <SettingsPage initial={data.settings} funding={data.funding} vaultUnlocked={data.vault.unlocked} notify={notify}/>}
@@ -467,8 +467,8 @@ function FundingRole({label, hint, detail, done, action}: {label: string; hint: 
     </div>;
 }
 
-function FundingPage({state, vaultUnlocked, notify, onNavigate}: {
-    state: control.FundingState; vaultUnlocked: boolean; notify: (k: Toast['kind'], t: string) => void; onNavigate: (p: Page) => void;
+function FundingPage({state, vaultUnlocked, wallets, notify, onNavigate}: {
+    state: control.FundingState; vaultUnlocked: boolean; wallets: vault.Summary[]; notify: (k: Toast['kind'], t: string) => void; onNavigate: (p: Page) => void;
 }) {
     const [creating, setCreating] = useState(false);
     const [startTarget, setStartTarget] = useState<control.FundingTask | null>(null);
@@ -528,7 +528,7 @@ function FundingPage({state, vaultUnlocked, notify, onNavigate}: {
             {!tasks.length && <Empty text="No routing tasks yet" action={<button className="secondary" onClick={() => setCreating(true)}><Plus size={16}/> Create task</button>}/>}
         </div>
         {!vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the wallet vault to start tasks; every hop signs transactions.</span></div>}
-        {creating && <FundingTaskDialog vaultUnlocked={vaultUnlocked} onClose={() => setCreating(false)} notify={notify} onCreated={task => { setCreating(false); notify('success', 'Task created — download the batch mnemonics before starting'); void exportBatches(task); }}/>}
+        {creating && <FundingTaskDialog vaultUnlocked={vaultUnlocked} wallets={selectableWallets(wallets, state.config)} onClose={() => setCreating(false)} notify={notify} onCreated={task => { setCreating(false); notify('success', 'Task created — download the batch mnemonics before starting'); void exportBatches(task); }}/>}
         {startTarget && <FundingStartDialog task={startTarget} busy={busy === `start:${startTarget.id}`} onClose={() => setStartTarget(null)} onConfirm={async () => {
             setBusy(`start:${startTarget.id}`);
             try { await StartFundingTask(startTarget.id, 'SEND'); notify('success', 'Routing task started'); setStartTarget(null); }
@@ -542,16 +542,33 @@ function FundingPage({state, vaultUnlocked, notify, onNavigate}: {
     </section>;
 }
 
-function FundingTaskDialog({vaultUnlocked, onClose, onCreated, notify}: {
-    vaultUnlocked: boolean; onClose: () => void; onCreated: (t: control.FundingTask) => void; notify: (k: Toast['kind'], t: string) => void;
+// selectableWallets hides the funding routing wallets (cold + relays) from the
+// task pickers so the route's own infrastructure can't be chosen as an endpoint.
+function selectableWallets(wallets: vault.Summary[], config?: control.FundingConfig) {
+    const excluded = new Set<string>();
+    if (config?.depositCold) excluded.add(config.depositCold.id);
+    for (const w of config?.depositRelays || []) excluded.add(w.id);
+    for (const w of config?.withdrawRelays || []) excluded.add(w.id);
+    return wallets.filter(w => !excluded.has(w.id));
+}
+
+function FundingTaskDialog({vaultUnlocked, wallets, onClose, onCreated, notify}: {
+    vaultUnlocked: boolean; wallets: vault.Summary[]; onClose: () => void; onCreated: (t: control.FundingTask) => void; notify: (k: Toast['kind'], t: string) => void;
 }) {
     const [kind, setKind] = useState<'distribute' | 'withdraw'>('distribute');
-    const [input, setInput] = useState('');
+    const [selected, setSelected] = useState<string[]>([]);
+    const [extraKeys, setExtraKeys] = useState('');
     const [saving, setSaving] = useState(false);
-    const lines = input.split(/[\s,;]+/).filter(Boolean).length;
+    const toggle = (id: string) => setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+    const keyCount = extraKeys.split(/[\s,;]+/).filter(Boolean).length;
+    const total = selected.length + (kind === 'withdraw' ? keyCount : 0);
     const create = async () => {
         setSaving(true);
-        try { onCreated(await CreateFundingTask(kind, input)); }
+        try {
+            const picked = wallets.filter(w => selected.includes(w.id)).map(w => w.address);
+            const input = kind === 'withdraw' ? [...picked, ...extraKeys.split(/[\s,;]+/).filter(Boolean)].join('\n') : picked.join('\n');
+            onCreated(await CreateFundingTask(kind, input));
+        }
         catch (e) { notify('error', String(e)); }
         finally { setSaving(false); }
     };
@@ -562,16 +579,26 @@ function FundingTaskDialog({vaultUnlocked, onClose, onCreated, notify}: {
                 <button className={kind === 'withdraw' ? 'active' : ''} onClick={() => setKind('withdraw')}>Withdraw · sources → cold</button>
             </div></Field>
             {kind === 'distribute'
-                ? <div className="inline-note"><Gauge size={17}/><span>Fund the deposit cold wallet first. Its full spendable balance is split randomly but near-evenly across the 10 relays, then into batch 1, then forwarded 1:1 through batches 2-5 to your target addresses.</span></div>
-                : <div className="inline-note"><Gauge size={17}/><span>Each source wallet moves its full balance 1:1 through batches 1-5, then the last batch gathers into the 10 withdraw relays, which pay the withdraw cold address. Sources must sign, so paste their private keys (or addresses already in the vault).</span></div>}
-            <Field label={kind === 'distribute' ? `Target addresses (${lines})` : `Source private keys or vault addresses (${lines})`}>
-                <textarea className={kind === 'withdraw' ? 'secret-area' : 'mono'} rows={9} value={input} onChange={e => setInput(e.target.value)}
-                    placeholder={kind === 'distribute' ? 'One destination address per line (up to 500)' : 'One private key per line; addresses are accepted for wallets already in the vault'}/>
-            </Field>
-            {kind === 'withdraw' && !vaultUnlocked && <div className="inline-note"><Lock size={17}/><span>Unlock the vault first: source keys are encrypted into it.</span></div>}
+                ? <div className="inline-note"><Gauge size={17}/><span>Fund the deposit cold wallet first. Its full spendable balance is split randomly but near-evenly across the 10 relays, then into batch 1, then forwarded 1:1 through batches 2-5 to the selected wallets.</span></div>
+                : <div className="inline-note"><Gauge size={17}/><span>Each source wallet moves its full balance 1:1 through batches 1-5, then the last batch gathers into the 10 withdraw relays, which pay the withdraw cold address.</span></div>}
+            {!vaultUnlocked ? <div className="inline-note"><Lock size={17}/><span>Unlock the wallet vault to pick wallets.</span></div> : <>
+                <div className="assignment-header"><div><strong>{kind === 'distribute' ? `Target wallets (${selected.length})` : `Source wallets (${selected.length})`}</strong><p>Pick from the wallet vault; funding routing wallets are hidden.</p></div><div className="assignment-actions">
+                    <button className="secondary small" disabled={!wallets.length || selected.length === wallets.length} onClick={() => setSelected(wallets.map(w => w.id))}><Check size={14}/> Select all</button>
+                    <button className="secondary small" disabled={!selected.length} onClick={() => setSelected([])}><X size={14}/> Clear</button>
+                </div></div>
+                <div className="funding-pick-list">
+                    {wallets.map(w => { const on = selected.includes(w.id); return <button key={w.id} className={on ? 'picked' : ''} onClick={() => toggle(w.id)}>
+                        {on ? <Check size={15}/> : <Square size={15}/>}<span>{w.label}</span><small className="mono">{short(w.address)}</small>
+                    </button>; })}
+                    {!wallets.length && <Empty text="No selectable wallets in the vault"/>}
+                </div>
+            </>}
+            {kind === 'withdraw' && <Field label={`Additional source private keys (${keyCount}) — optional, for wallets not yet in the vault`}>
+                <textarea className="secret-area" rows={4} value={extraKeys} onChange={e => setExtraKeys(e.target.value)} placeholder="One private key per line; they are encrypted into the vault on create"/>
+            </Field>}
         </div></div>
         <div className="dialog-footer"><button className="secondary" onClick={onClose}>Cancel</button>
-            <button className="primary" disabled={saving || !input.trim() || (kind === 'withdraw' && !vaultUnlocked)} onClick={create}><Plus size={16}/>{saving ? 'Creating' : 'Create task'}</button></div>
+            <button className="primary" disabled={saving || !total || !vaultUnlocked} onClick={create}><Plus size={16}/>{saving ? 'Creating' : `Create task (${total})`}</button></div>
     </Modal>;
 }
 
