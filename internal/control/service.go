@@ -43,6 +43,7 @@ type Service struct {
 	jobs        map[string]*runningJob
 	usedWallets map[string]string
 	logs        []LogEntry
+	logFile     *os.File
 	emit        func(string, any)
 	init        InitStatus
 }
@@ -55,12 +56,21 @@ func NewService(dataDir string) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	// Engine logs are mirrored to a plain-text file so errors survive an app
+	// restart and can be inspected outside the UI. Failure to open the file is
+	// not fatal; the in-memory log keeps working.
+	logFile, err := os.OpenFile(filepath.Join(dataDir, "ponsdesk.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		logFile = nil
+	}
 	return &Service{
 		root:        context.Background(),
 		config:      config,
 		vault:       vault.New(filepath.Join(dataDir, "wallets.vault")),
 		jobs:        make(map[string]*runningJob),
 		usedWallets: make(map[string]string),
+		logFile:     logFile,
 	}, nil
 }
 
@@ -351,6 +361,10 @@ func (s *Service) Shutdown() {
 			job.cancel()
 		}
 	}
+	if s.logFile != nil {
+		s.logFile.Close()
+		s.logFile = nil
+	}
 	s.mu.Unlock()
 }
 
@@ -485,6 +499,9 @@ func (s *Service) appendLog(entry LogEntry) {
 	s.logs = append(s.logs, entry)
 	if len(s.logs) > maxLogs {
 		s.logs = append([]LogEntry(nil), s.logs[len(s.logs)-maxLogs:]...)
+	}
+	if s.logFile != nil {
+		fmt.Fprintf(s.logFile, "%s %-5s [%s] %s\n", entry.At, entry.Level, entry.StrategyID, entry.Message)
 	}
 	s.mu.Unlock()
 	s.emitEvent("strategy-log", entry)
