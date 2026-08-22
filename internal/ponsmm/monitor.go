@@ -54,10 +54,16 @@ type Monitor struct {
 	lastPriceWeiPerTok *big.Float
 	lastTradeAt        time.Time
 	poolTokenReserve   *big.Int // tokens still sitting in the pool (not yet bought)
+	poolQuoteReserve   *big.Int // quote (ETH) side of the curve, kept hot by the reserve poller
+	reservesAt         time.Time
 	ownTx              map[common.Hash]bool
 	startBlock         uint64
 	seenTrades         map[tradeLogID]struct{}
 }
+
+// reserveCacheMaxAge bounds how stale the polled reserve pair may be before
+// quoting falls back to a live chain read.
+const reserveCacheMaxAge = 2 * time.Second
 
 type tradeLogID struct {
 	tx    common.Hash
@@ -89,6 +95,7 @@ func NewMonitor(client *pons.Client, pool *Pool, token, poolAddr common.Address,
 		costBasisKnown:   true,
 		retailNetTokens:  big.NewInt(0),
 		poolTokenReserve: big.NewInt(0),
+		poolQuoteReserve: big.NewInt(0),
 		ownTx:            map[common.Hash]bool{},
 		seenTrades:       map[tradeLogID]struct{}{},
 	}
@@ -185,12 +192,14 @@ func (m *Monitor) Snapshot() Snapshot {
 // engine can compute circulating supply and our holding fraction.
 func (m *Monitor) RefreshReserves(ctx context.Context) error {
 	if m.curveMode {
-		_, tokenReserve, err := m.client.Reserves(ctx, m.poolAddr)
+		quoteReserve, tokenReserve, err := m.client.Reserves(ctx, m.poolAddr)
 		if err != nil {
 			return err
 		}
 		m.mu.Lock()
 		m.poolTokenReserve = tokenReserve
+		m.poolQuoteReserve = quoteReserve
+		m.reservesAt = time.Now()
 		m.mu.Unlock()
 		return nil
 	}
@@ -202,6 +211,35 @@ func (m *Monitor) RefreshReserves(ctx context.Context) error {
 	m.poolTokenReserve = bal
 	m.mu.Unlock()
 	return nil
+}
+
+// CachedReserves returns the reserve pair the background poller maintains.
+// ok is false when the cache is missing or older than reserveCacheMaxAge, in
+// which case the caller must fall back to a live chain read.
+func (m *Monitor) CachedReserves() (quoteReserve, tokenReserve *big.Int, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reservesAt.IsZero() || time.Since(m.reservesAt) > reserveCacheMaxAge {
+		return nil, nil, false
+	}
+	return new(big.Int).Set(m.poolQuoteReserve), new(big.Int).Set(m.poolTokenReserve), true
+}
+
+// pollReserves keeps both curve reserves hot on a fixed cadence, so pricing a
+// sell (or the retail-response decision) never has to wait on a chain read.
+func (m *Monitor) pollReserves(ctx context.Context) {
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if err := m.RefreshReserves(ctx); err != nil && ctx.Err() == nil {
+				m.log.Debug("reserve poll failed", "err", err)
+			}
+		}
+	}
 }
 
 // Run consumes pool trades until ctx ends. Retail trades are pushed onto
@@ -245,6 +283,8 @@ func (m *Monitor) Run(ctx context.Context) {
 }
 
 func (m *Monitor) runCurve(ctx context.Context) {
+	// Dedicated reserve poller: quoting reads this cache instead of the chain.
+	go m.pollReserves(ctx)
 	live := m.client.WatchCurveTradeEvents(ctx, m.poolAddr, m.log)
 	if live == nil {
 		m.log.Warn("pons v2: curve trade subscription unavailable; monitor will poll")

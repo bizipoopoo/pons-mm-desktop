@@ -794,7 +794,9 @@ func (e *Engine) onRetail(ctx context.Context, ev RetailEvent) {
 				e.log.Info("profit does not yet cover fees -> distributing in small wallet batches",
 					"batch_wallets", fmt.Sprintf("%d-%d", distributionBatchMin, distributionBatchMax),
 					"interval", e.cfg.SellInterval, "concurrent", e.cfg.ConcurrentSells)
-				e.startDistributionRound(ctx)
+				// Reuse the quote the decision just fetched so the first batch
+				// broadcasts without another reserve round trip.
+				e.startDistributionRoundQuoted(ctx, proceeds, snap.OurTokens)
 			} else {
 				e.log.Info("additional retail buy detected; continuing batch distribution",
 					"retail_net_tokens", snap.RetailNetTokens.String())
@@ -911,6 +913,12 @@ func (e *Engine) distributeStep(ctx context.Context) {
 }
 
 func (e *Engine) startDistributionRound(ctx context.Context) {
+	e.startDistributionRoundQuoted(ctx, nil, nil)
+}
+
+// startDistributionRoundQuoted launches one batch; quote/quotedTokens, when
+// set, price the batch from a quote already in hand instead of a fresh read.
+func (e *Engine) startDistributionRoundQuoted(ctx context.Context, quote, quotedTokens *big.Int) {
 	if e.distributionRoundRunning {
 		return
 	}
@@ -930,7 +938,7 @@ func (e *Engine) startDistributionRound(ctx context.Context) {
 	}
 	e.distributionRoundRunning = true
 	go func(batch []*Wallet) {
-		err := e.sellWalletBatch(ctx, batch)
+		err := e.sellWalletBatch(ctx, batch, quote, quotedTokens)
 		e.distributionResults <- distributionResult{err: err}
 	}(wallets)
 	e.log.Info("distribution batch submitted", "wallets", len(wallets),
@@ -959,17 +967,14 @@ func (e *Engine) distributionWalletBatch() []*Wallet {
 	return held[:size]
 }
 
-func (e *Engine) sellWalletBatch(ctx context.Context, wallets []*Wallet) error {
-	var errs []error
-	var mu sync.Mutex
-	runWalletActions(e.cfg.ConcurrentSells, wallets, func(w *Wallet) {
-		if err := e.sellOnce(ctx, w, w.tokenBalance()); err != nil {
-			mu.Lock()
-			errs = append(errs, fmt.Errorf("wallet %s: %w", w.Addr.Hex(), err))
-			mu.Unlock()
-		}
-	})
-	return errors.Join(errs...)
+// sellWalletBatch clears one distribution batch on the same fast path the
+// full exit uses: one aggregate quote priced proportionally across the batch,
+// no per-wallet graduation check. Selling each wallet with its own quote and
+// graduation RPCs delayed the first sell broadcast by ~2s after a retail buy —
+// an eternity on a 100ms-block chain. Graduation is still policed by the
+// reserve ticker; a sell racing it reverts harmlessly.
+func (e *Engine) sellWalletBatch(ctx context.Context, wallets []*Wallet, quote, quotedTokens *big.Int) error {
+	return e.sellWalletsFast(ctx, wallets, quote, quotedTokens, e.cfg.ConcurrentSells)
 }
 
 func (e *Engine) applyDistributionResult(result distributionResult) {
@@ -1365,6 +1370,16 @@ func (e *Engine) sellTrancheWithMode(ctx context.Context, frac float64, concurre
 // for the retail decision. It avoids repeating reserve and graduation calls for
 // every wallet and broadcasts every sell before waiting on confirmations.
 func (e *Engine) sellAllFast(ctx context.Context, totalQuote *big.Int) error {
+	return e.sellWalletsFast(ctx, e.pool.All(), totalQuote, nil, true)
+}
+
+// sellWalletsFast clears the given wallets with one shared price: a single
+// aggregate quote split proportionally replaces the reserve read and
+// graduation check each wallet used to make on its own, so every sell reaches
+// the mempool one round trip after the decision. When totalQuote was fetched
+// for a different token amount, quotedTokens carries that amount so the quote
+// can be rescaled to this batch.
+func (e *Engine) sellWalletsFast(ctx context.Context, wallets []*Wallet, totalQuote, quotedTokens *big.Int, concurrent bool) error {
 	type plannedSell struct {
 		wallet *Wallet
 		amount *big.Int
@@ -1372,7 +1387,7 @@ func (e *Engine) sellAllFast(ctx context.Context, totalQuote *big.Int) error {
 	}
 	var plans []plannedSell
 	totalTokens := big.NewInt(0)
-	for _, w := range e.pool.All() {
+	for _, w := range wallets {
 		amount := w.tokenBalance()
 		if amount.Sign() == 0 {
 			continue
@@ -1383,29 +1398,43 @@ func (e *Engine) sellAllFast(ctx context.Context, totalQuote *big.Int) error {
 	if totalTokens.Sign() == 0 {
 		return nil
 	}
-	if totalQuote == nil || totalQuote.Sign() <= 0 {
+	switch {
+	case totalQuote == nil || totalQuote.Sign() <= 0:
 		totalQuote = e.quoteSellAll(ctx, totalTokens)
+	case quotedTokens != nil && quotedTokens.Sign() > 0 && quotedTokens.Cmp(totalTokens) != 0:
+		// Linear rescale of a curve quote slightly understates a smaller batch's
+		// proceeds, which only lowers minOut — safe, and saves a reserve read.
+		totalQuote = new(big.Int).Div(
+			new(big.Int).Mul(totalQuote, totalTokens), quotedTokens)
 	}
 	for i := range plans {
 		plans[i].quote = new(big.Int).Div(
 			new(big.Int).Mul(totalQuote, plans[i].amount), totalTokens)
 	}
-	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	var sellErrors []error
-	wg.Add(len(plans))
-	for _, plan := range plans {
-		plan := plan
-		go func() {
-			defer wg.Done()
-			if err := e.sellOnceWithQuote(ctx, plan.wallet, plan.amount, plan.quote, true); err != nil {
-				errMu.Lock()
-				sellErrors = append(sellErrors, fmt.Errorf("wallet %s: %w", plan.wallet.Addr.Hex(), err))
-				errMu.Unlock()
-			}
-		}()
+	sellPlan := func(plan plannedSell) {
+		if err := e.sellOnceWithQuote(ctx, plan.wallet, plan.amount, plan.quote, true); err != nil {
+			errMu.Lock()
+			sellErrors = append(sellErrors, fmt.Errorf("wallet %s: %w", plan.wallet.Addr.Hex(), err))
+			errMu.Unlock()
+		}
 	}
-	wg.Wait()
+	if concurrent {
+		var wg sync.WaitGroup
+		wg.Add(len(plans))
+		for _, plan := range plans {
+			go func(plan plannedSell) {
+				defer wg.Done()
+				sellPlan(plan)
+			}(plan)
+		}
+		wg.Wait()
+	} else {
+		for _, plan := range plans {
+			sellPlan(plan)
+		}
+	}
 	return errors.Join(sellErrors...)
 }
 
@@ -1672,7 +1701,7 @@ func (e *Engine) quoteBuy(ctx context.Context, wallet *Wallet, quoteIn *big.Int)
 	if e.cfg.ProtocolName() == ProtocolV1 {
 		return e.client.QuoteV1Buy(ctx, e.token, quoteIn)
 	}
-	quoteReserve, tokenReserve, err := e.client.Reserves(ctx, e.poolAddr)
+	quoteReserve, tokenReserve, err := e.curveReserves(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1688,10 +1717,22 @@ func (e *Engine) quoteSell(ctx context.Context, tokens *big.Int) (*big.Int, erro
 	if e.cfg.ProtocolName() == ProtocolV1 {
 		return e.client.QuoteV1Sell(ctx, e.token, tokens)
 	}
-	quoteReserve, tokenReserve, err := e.client.Reserves(ctx, e.poolAddr)
+	quoteReserve, tokenReserve, err := e.curveReserves(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return pons.QuoteOutForTokens(quoteReserve, tokenReserve, tokens,
 		e.v2Info.FeeBps, e.v2Info.CreatorTaxBps), nil
+}
+
+// curveReserves serves the v2 curve's reserve pair from the monitor's
+// background poller when the cache is fresh, so quoting stays off the RPC hot
+// path; a stale or missing cache falls back to a live read.
+func (e *Engine) curveReserves(ctx context.Context) (quoteReserve, tokenReserve *big.Int, err error) {
+	if e.monitor != nil {
+		if q, t, ok := e.monitor.CachedReserves(); ok {
+			return q, t, nil
+		}
+	}
+	return e.client.Reserves(ctx, e.poolAddr)
 }
