@@ -232,7 +232,16 @@ func (p *Pool) RefreshETH(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("nonce %s: %w", w.Addr.Hex(), err)
 		}
-		w.Nonce = n
+		// Only ever advance the cached nonce. A launch fires the burst buys and
+		// their sell approvals asynchronously, so a refresh that races those
+		// in-flight sends can read a pending nonce that has not yet caught up —
+		// writing it back verbatim would rewind the counter and make the next
+		// send collide with an already-used nonce ("nonce too low").
+		w.txMu.Lock()
+		if n > w.Nonce {
+			w.Nonce = n
+		}
+		w.txMu.Unlock()
 		return nil
 	})
 }
@@ -279,8 +288,17 @@ func (p *Pool) txParams(ctx context.Context, w *Wallet, gasLimit uint64, extraTi
 }
 
 // send broadcasts a signed tx and advances the sending wallet's cached nonce.
+// Callers hold w.txMu across txParams+build+send so the nonce read here matches
+// the one that was signed.
 func (p *Pool) send(ctx context.Context, w *Wallet, tx *types.Transaction) error {
 	if err := p.Client.Send(ctx, tx); err != nil {
+		// Re-sync the cached nonce from the chain on failure. Without this a
+		// wallet whose counter fell behind (e.g. a refresh raced an in-flight
+		// send) would resubmit the same stale nonce forever, and a distribution
+		// batch would spin on it instead of clearing the wallet.
+		if n, e2 := p.Client.PendingNonce(ctx, w.Addr); e2 == nil {
+			w.Nonce = n
+		}
 		return err
 	}
 	w.Nonce++
