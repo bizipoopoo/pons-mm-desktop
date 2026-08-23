@@ -34,6 +34,12 @@ jobs:
 
   secrets:
     runs-on: ubuntu-latest
+    # Dependabot-triggered runs get a minimal read-only token; gitleaks-action
+    # lists the PR's commits, so it needs pull-requests: read declared
+    # explicitly or those runs fail with 403.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
