@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"golang.org/x/time/rate"
 
 	"github.com/bizipoopoo/pons-mm-desktop/internal/pons"
 )
@@ -28,9 +31,66 @@ const (
 	fundingTransferGasFallback = 300_000
 	// fundingSendWorkers bounds concurrent sweep transfers so a 500-wallet hop
 	// does not flood the public RPC.
-	fundingSendWorkers = 12
+	fundingSendWorkers = 8
 	fundingReceiptWait = 120 * time.Second
+	// fundingRPCRate caps the engine's total RPC throughput well below
+	// QuickNode's 50 req/s plan limit, leaving headroom for strategy jobs and
+	// the background gas warmer that share the endpoint.
+	fundingRPCRate  = 20
+	fundingRPCBurst = 10
+	fundingRPCTries = 6
 )
+
+// fundingRPC runs one RPC call under the task's shared rate limiter and
+// retries transient failures (endpoint rate limiting, timeouts) with
+// exponential backoff, so hitting the provider's request cap slows a task
+// down instead of failing it.
+func fundingRPC[T any](ctx context.Context, lim *rate.Limiter, fn func() (T, error)) (T, error) {
+	var zero T
+	backoff := time.Second
+	for attempt := 1; ; attempt++ {
+		if err := lim.Wait(ctx); err != nil {
+			return zero, err
+		}
+		out, err := fn()
+		if err == nil {
+			return out, nil
+		}
+		if attempt >= fundingRPCTries || !isTransientRPCError(err) {
+			return zero, err
+		}
+		select {
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+func isTransientRPCError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"limit reached", "rate limit", "too many requests", "429",
+		"timeout", "deadline exceeded", "connection reset", "eof",
+		"503", "502", "temporarily", "busy",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTxAlreadyKnown reports whether a send failure means the transaction in
+// fact reached the pool (e.g. an earlier attempt succeeded but its response
+// was lost to throttling). The caller then just waits for the receipt.
+func isTxAlreadyKnown(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already known") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "nonce too low")
+}
 
 // fundingSigner pairs a signing key with its address for one routing wallet.
 type fundingSigner struct {
@@ -193,10 +253,11 @@ func (s *Service) runFundingTask(ctx context.Context, rec fundingTaskRecord, cfg
 		rec.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		s.emitFundingTask(rec.FundingTask)
 	}
+	lim := rate.NewLimiter(fundingRPCRate, fundingRPCBurst)
 	for i, hop := range hops {
 		rec.Message = fmt.Sprintf("Hop %d/%d: %s", i+1, len(hops), hop.name)
 		progress()
-		if err := s.execFundingHop(ctx, client, hop, &rec, progress); err != nil {
+		if err := s.execFundingHop(ctx, client, lim, hop, &rec, progress); err != nil {
 			if ctx.Err() != nil {
 				finish("stopped", "Stopped; start again to continue from the current chain state")
 				return
@@ -345,19 +406,26 @@ func relaySlice(r, n int) (start, end int) {
 	return r * n / fundingRelayCount, (r + 1) * n / fundingRelayCount
 }
 
-func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop fundingHop, rec *fundingTaskRecord, progress func()) error {
-	tip, feeCap, err := client.SuggestGas(ctx, nil)
+func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, lim *rate.Limiter, hop fundingHop, rec *fundingTaskRecord, progress func()) error {
+	type gasQuote struct{ tip, feeCap *big.Int }
+	quote, err := fundingRPC(ctx, lim, func() (gasQuote, error) {
+		tip, feeCap, err := client.SuggestGas(ctx, nil)
+		return gasQuote{tip, feeCap}, err
+	})
 	if err != nil {
 		return fmt.Errorf("gas estimate: %w", err)
 	}
+	tip, feeCap := quote.tip, quote.feeCap
 	// Estimate per sender (funded at this point) with our real fee caps so
 	// Nitro prices the L1 component at the same effective price the tx pays,
 	// then add 50% headroom because that component drifts between estimate
 	// and submission.
 	estimateGas := func(from, to common.Address) uint64 {
-		est, err := client.Eth().EstimateGas(ctx, ethereum.CallMsg{
-			From: from, To: &to, Value: big.NewInt(1),
-			GasFeeCap: feeCap, GasTipCap: tip,
+		est, err := fundingRPC(ctx, lim, func() (uint64, error) {
+			return client.Eth().EstimateGas(ctx, ethereum.CallMsg{
+				From: from, To: &to, Value: big.NewInt(1),
+				GasFeeCap: feeCap, GasTipCap: tip,
+			})
 		})
 		if err != nil || est == 0 {
 			return fundingTransferGasFallback
@@ -367,6 +435,16 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 			limit = fundingTransferGasFloor
 		}
 		return limit
+	}
+	balanceOf := func(addr common.Address) (*big.Int, error) {
+		return fundingRPC(ctx, lim, func() (*big.Int, error) {
+			return client.EthBalance(ctx, addr)
+		})
+	}
+	nonceOf := func(addr common.Address) (uint64, error) {
+		return fundingRPC(ctx, lim, func() (uint64, error) {
+			return client.PendingNonce(ctx, addr)
+		})
 	}
 
 	var mu sync.Mutex
@@ -390,7 +468,16 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 		if err != nil {
 			return common.Hash{}, err
 		}
-		if err := client.Send(ctx, tx); err != nil {
+		_, err = fundingRPC(ctx, lim, func() (struct{}, error) {
+			err := client.Send(ctx, tx)
+			if err != nil && isTxAlreadyKnown(err) {
+				// A retried broadcast whose first attempt landed: the receipt
+				// wait below settles it.
+				return struct{}{}, nil
+			}
+			return struct{}{}, err
+		})
+		if err != nil {
 			return common.Hash{}, err
 		}
 		return tx.Hash(), nil
@@ -403,7 +490,7 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 		wg.Add(1)
 		go func(spec splitSpec) {
 			defer wg.Done()
-			balance, err := client.EthBalance(ctx, spec.from.addr)
+			balance, err := balanceOf(spec.from.addr)
 			if err != nil {
 				fail(fmt.Errorf("balance of %s: %w", spec.from.addr.Hex(), err))
 				return
@@ -425,7 +512,7 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 				return
 			}
 			amounts := randomNearEvenSplit(spendable, len(spec.to))
-			nonce, err := client.PendingNonce(ctx, spec.from.addr)
+			nonce, err := nonceOf(spec.from.addr)
 			if err != nil {
 				fail(fmt.Errorf("nonce of %s: %w", spec.from.addr.Hex(), err))
 				return
@@ -453,7 +540,7 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			balance, err := client.EthBalance(ctx, spec.from.addr)
+			balance, err := balanceOf(spec.from.addr)
 			if err != nil {
 				fail(fmt.Errorf("balance of %s: %w", spec.from.addr.Hex(), err))
 				return
@@ -468,7 +555,7 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 				bump() // only gas dust left: not worth moving
 				return
 			}
-			nonce, err := client.PendingNonce(ctx, spec.from.addr)
+			nonce, err := nonceOf(spec.from.addr)
 			if err != nil {
 				fail(fmt.Errorf("nonce of %s: %w", spec.from.addr.Hex(), err))
 				return
@@ -490,6 +577,8 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 	}
 
 	// The next hop sweeps what this hop delivered, so every receipt must land.
+	// Polling goes through the same limiter as everything else so dozens of
+	// concurrent waits cannot blow the endpoint's request budget.
 	sem = make(chan struct{}, fundingSendWorkers)
 	for _, hash := range hashes {
 		wg.Add(1)
@@ -497,13 +586,35 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			rcpt, err := client.WaitReceipt(ctx, hash, fundingReceiptWait)
-			if err != nil {
-				fail(fmt.Errorf("confirm %s: %w", hash.Hex(), err))
-				return
-			}
-			if rcpt.Status != 1 {
-				fail(fmt.Errorf("transfer %s reverted", hash.Hex()))
+			deadline := time.Now().Add(fundingReceiptWait)
+			for {
+				rcpt, err := fundingRPC(ctx, lim, func() (*types.Receipt, error) {
+					r, err := client.Eth().TransactionReceipt(ctx, hash)
+					if errors.Is(err, ethereum.NotFound) {
+						return nil, nil // still pending: keep polling
+					}
+					return r, err
+				})
+				if err != nil {
+					fail(fmt.Errorf("confirm %s: %w", hash.Hex(), err))
+					return
+				}
+				if rcpt != nil {
+					if rcpt.Status != 1 {
+						fail(fmt.Errorf("transfer %s reverted", hash.Hex()))
+					}
+					return
+				}
+				if time.Now().After(deadline) {
+					fail(fmt.Errorf("confirm %s: not confirmed within %s", hash.Hex(), fundingReceiptWait))
+					return
+				}
+				select {
+				case <-ctx.Done():
+					fail(ctx.Err())
+					return
+				case <-time.After(700 * time.Millisecond):
+				}
 			}
 		}(hash)
 	}
