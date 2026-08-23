@@ -6,7 +6,7 @@ require (
 	github.com/ethereum/go-ethereum v1.17.5
 	github.com/miguelmota/go-ethereum-hdwallet v0.1.3
 	github.com/tyler-smith/go-bip39 v1.1.0
-	github.com/wailsapp/wails/v2 v2.14.0
+	github.com/wailsapp/wails/v2 v2.15.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/time v0.10.0
 	gopkg.in/yaml.v3 v3.0.1
