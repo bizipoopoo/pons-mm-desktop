@@ -9,13 +9,23 @@ import (
 	"sync"
 	"time"
 
+	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/bizipoopoo/pons-mm-desktop/internal/pons"
 )
 
 const (
-	fundingTransferGas = 21_000
+	// Robinhood Chain runs Arbitrum Nitro: a transfer's minimum gas is 21000
+	// plus the L1 data-posting cost converted to gas units at the tx's
+	// effective price. With the chain's ~0.02 gwei base fee that component
+	// swings from 0 to well past 100k as L1 prices move, so a fixed 21000
+	// limit is rejected intermittently with "intrinsic gas too low". Limits
+	// are therefore estimated per transfer with generous headroom; unused gas
+	// is refunded, only the fee reserve (a few millionths of an ETH at these
+	// prices) is sized by the limit.
+	fundingTransferGasFloor    = 60_000
+	fundingTransferGasFallback = 300_000
 	// fundingSendWorkers bounds concurrent sweep transfers so a 500-wallet hop
 	// does not flood the public RPC.
 	fundingSendWorkers = 12
@@ -340,7 +350,24 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 	if err != nil {
 		return fmt.Errorf("gas estimate: %w", err)
 	}
-	gasPerTx := new(big.Int).Mul(feeCap, big.NewInt(fundingTransferGas))
+	// Estimate per sender (funded at this point) with our real fee caps so
+	// Nitro prices the L1 component at the same effective price the tx pays,
+	// then add 50% headroom because that component drifts between estimate
+	// and submission.
+	estimateGas := func(from, to common.Address) uint64 {
+		est, err := client.Eth().EstimateGas(ctx, ethereum.CallMsg{
+			From: from, To: &to, Value: big.NewInt(1),
+			GasFeeCap: feeCap, GasTipCap: tip,
+		})
+		if err != nil || est == 0 {
+			return fundingTransferGasFallback
+		}
+		limit := est + est/2
+		if limit < fundingTransferGasFloor {
+			limit = fundingTransferGasFloor
+		}
+		return limit
+	}
 
 	var mu sync.Mutex
 	var errs []error
@@ -356,9 +383,9 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 		errs = append(errs, err)
 		mu.Unlock()
 	}
-	send := func(from fundingSigner, to common.Address, amount *big.Int, nonce uint64) (common.Hash, error) {
+	send := func(from fundingSigner, to common.Address, amount *big.Int, gasLimit, nonce uint64) (common.Hash, error) {
 		tx, err := from.signer.BuildTransfer(to, amount, pons.TxParams{
-			Nonce: nonce, GasLimit: fundingTransferGas, TipCap: tip, FeeCap: feeCap,
+			Nonce: nonce, GasLimit: gasLimit, TipCap: tip, FeeCap: feeCap,
 		})
 		if err != nil {
 			return common.Hash{}, err
@@ -381,9 +408,17 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 				fail(fmt.Errorf("balance of %s: %w", spec.from.addr.Hex(), err))
 				return
 			}
+			if balance.Sign() <= 0 {
+				// Already forwarded on a previous run (or never funded): skip.
+				for range spec.to {
+					bump()
+				}
+				return
+			}
+			gasLimit := estimateGas(spec.from.addr, spec.to[0])
+			gasPerTx := new(big.Int).Mul(feeCap, new(big.Int).SetUint64(gasLimit))
 			spendable := new(big.Int).Sub(balance, new(big.Int).Mul(gasPerTx, big.NewInt(int64(len(spec.to)))))
 			if spendable.Sign() <= 0 {
-				// Already forwarded on a previous run (or never funded): skip.
 				for range spec.to {
 					bump()
 				}
@@ -396,7 +431,7 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 				return
 			}
 			for i, to := range spec.to {
-				hash, err := send(spec.from, to, amounts[i], nonce)
+				hash, err := send(spec.from, to, amounts[i], gasLimit, nonce)
 				if err != nil {
 					fail(fmt.Errorf("split from %s: %w", spec.from.addr.Hex(), err))
 					return
@@ -423,9 +458,14 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 				fail(fmt.Errorf("balance of %s: %w", spec.from.addr.Hex(), err))
 				return
 			}
-			amount := new(big.Int).Sub(balance, gasPerTx)
-			if amount.Sign() <= 0 {
+			if balance.Sign() <= 0 {
 				bump() // nothing to move: already swept or never funded
+				return
+			}
+			gasLimit := estimateGas(spec.from.addr, spec.to)
+			amount := new(big.Int).Sub(balance, new(big.Int).Mul(feeCap, new(big.Int).SetUint64(gasLimit)))
+			if amount.Sign() <= 0 {
+				bump() // only gas dust left: not worth moving
 				return
 			}
 			nonce, err := client.PendingNonce(ctx, spec.from.addr)
@@ -433,7 +473,7 @@ func (s *Service) execFundingHop(ctx context.Context, client *pons.Client, hop f
 				fail(fmt.Errorf("nonce of %s: %w", spec.from.addr.Hex(), err))
 				return
 			}
-			hash, err := send(spec.from, spec.to, amount, nonce)
+			hash, err := send(spec.from, spec.to, amount, gasLimit, nonce)
 			if err != nil {
 				fail(fmt.Errorf("sweep from %s: %w", spec.from.addr.Hex(), err))
 				return
