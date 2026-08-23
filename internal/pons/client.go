@@ -34,11 +34,18 @@ type Client struct {
 }
 
 // Dial connects to the RPC endpoint and pins the pons factory address.
+// HTTP(S) endpoints get a transport that transparently retries rate-limit
+// rejections with backoff (see transport.go), so a burst over the provider's
+// requests-per-second cap slows callers down instead of failing them.
 func Dial(ctx context.Context, rpcURL string) (*Client, error) {
 	if rpcURL == "" {
 		rpcURL = DefaultRPC
 	}
-	rc, err := rpc.DialContext(ctx, rpcURL)
+	var opts []rpc.ClientOption
+	if strings.HasPrefix(rpcURL, "http") {
+		opts = append(opts, rpc.WithHTTPClient(newRetryHTTPClient()))
+	}
+	rc, err := rpc.DialOptions(ctx, rpcURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", redact(rpcURL), err)
 	}
