@@ -61,6 +61,8 @@ type Strategy struct {
 	Graduate             bool      `json:"graduate"`
 	SellIntervalMS       int64     `json:"sellIntervalMs"`
 	SequentialSells      bool      `json:"sequentialSells"`
+	RetailResponseMode   string    `json:"retailResponseMode"`
+	RetailTargetRatio    float64   `json:"retailTargetRatio"`
 	SlippageBps          int64     `json:"slippageBps"`
 	PriorityTipGwei      float64   `json:"priorityTipGwei"`
 	GasReserveETH        float64   `json:"gasReserveEth"`
@@ -81,6 +83,8 @@ func NewStrategy() Strategy {
 		Graduate:             true,
 		SellIntervalMS:       1000,
 		SequentialSells:      false,
+		RetailResponseMode:   ponsmm.RetailResponseDistribute,
+		RetailTargetRatio:    0,
 		SlippageBps:          1500,
 		PriorityTipGwei:      1,
 		GasReserveETH:        0.002,
@@ -112,6 +116,8 @@ func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
 		Graduate:           s.Graduate,
 		SellInterval:       time.Duration(s.SellIntervalMS) * time.Millisecond,
 		ConcurrentSells:    !s.SequentialSells,
+		RetailResponse:     s.RetailResponseMode,
+		RetailTargetRatio:  s.RetailTargetRatio,
 		SlippageBps:        s.SlippageBps,
 		PriorityTipGwei:    s.PriorityTipGwei,
 		GasReserveETH:      s.GasReserveETH,

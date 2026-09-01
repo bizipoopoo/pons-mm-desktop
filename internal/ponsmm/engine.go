@@ -800,10 +800,21 @@ func (e *Engine) onRetail(ctx context.Context, ev RetailEvent) {
 		proceeds := e.quoteSellAll(ctx, snap.OurTokens)
 		totalCost := e.totalCostWei(snap.OurWethSpent)
 		next := retailBuyResponse(proceeds, totalCost, snap.CostBasisKnown)
+		decision := next.String()
+		if next == Distributing && e.cfg.RetailResponseName() == RetailResponseTarget {
+			decision = "price-target response"
+		}
 		e.log.Info("retail buy decision",
 			"sell_all_proceeds_eth", weiToEthStr(proceeds),
 			"total_cost_eth", weiToEthStr(totalCost),
-			"cost_basis_known", snap.CostBasisKnown, "decision", next.String())
+			"cost_basis_known", snap.CostBasisKnown, "decision", decision)
+		if next == Distributing && e.cfg.RetailResponseName() == RetailResponseTarget {
+			// The parameterized strategy replaces slow distribution: act by
+			// RetailTargetRatio against the retail average buy price and keep
+			// the state machine in its current mode.
+			e.startTargetResponse(ctx, snap)
+			return
+		}
 		e.state = next
 		switch next {
 		case ClearAll:
@@ -864,6 +875,13 @@ func (e *Engine) resumeAfterRetailSell() {
 // threshold.
 func (e *Engine) startAccumulationRound(ctx context.Context) {
 	if e.pendingBuyCount() > 0 {
+		return
+	}
+	// In sell-target mode the response pins the price below the retail average
+	// buy price; pump buys while retail still holds would immediately undo
+	// that. Accumulation resumes on its own once retail is flat again.
+	if e.cfg.RetailResponseName() == RetailResponseTarget && e.cfg.RetailTargetRatio < 0 &&
+		e.monitor.Snapshot().RetailNetTokens.Sign() > 0 {
 		return
 	}
 	e.buyRoundMu.Lock()
@@ -1003,7 +1021,7 @@ func (e *Engine) sellWalletBatch(ctx context.Context, wallets []*Wallet, quote, 
 func (e *Engine) applyDistributionResult(result distributionResult) {
 	e.distributionRoundRunning = false
 	if result.err != nil {
-		e.log.Warn("distribution batch failed", "err", result.err)
+		e.log.Warn("retail response batch failed", "err", result.err)
 	}
 	if e.state == Distributing && e.pendingBuyCount() == 0 && e.pool.TotalTokens().Sign() == 0 {
 		e.log.Info("distribution complete; all wallet batches cleared -> done")

@@ -48,6 +48,8 @@ type Monitor struct {
 	// Retail state.
 	retailNetTokens  *big.Int   // retail net token holding (their buys - sells)
 	retailLastBuyPx  *big.Float // wei-per-token of the most recent retail buy (their cost anchor)
+	retailBuyWeth    *big.Int   // cumulative quote retail spent buying since they were last flat
+	retailBuyTokens  *big.Int   // cumulative tokens retail bought since they were last flat
 	lastRetailBuyAt  time.Time
 	lastRetailSellAt time.Time
 	// Market state.
@@ -94,6 +96,8 @@ func NewMonitor(client *pons.Client, pool *Pool, token, poolAddr common.Address,
 		ourTokens:        big.NewInt(0),
 		costBasisKnown:   true,
 		retailNetTokens:  big.NewInt(0),
+		retailBuyWeth:    big.NewInt(0),
+		retailBuyTokens:  big.NewInt(0),
 		poolTokenReserve: big.NewInt(0),
 		poolQuoteReserve: big.NewInt(0),
 		ownTx:            map[common.Hash]bool{},
@@ -143,8 +147,12 @@ type Snapshot struct {
 	OurTokens        *big.Int
 	OurWethSpent     *big.Int
 	CostBasisKnown   bool
-	RetailNetTokens  *big.Int
-	RetailLastBuyPx  *big.Float
+	RetailNetTokens *big.Int
+	RetailLastBuyPx *big.Float
+	// RetailAvgBuyPx is the volume-weighted average price (wei per whole
+	// token) of every retail buy since retail was last flat; nil before the
+	// first retail buy.
+	RetailAvgBuyPx   *big.Float
 	LastRetailBuyAt  time.Time
 	LastRetailSellAt time.Time
 	LastTradeAt      time.Time
@@ -179,6 +187,7 @@ func (m *Monitor) Snapshot() Snapshot {
 		CostBasisKnown:     m.costBasisKnown,
 		RetailNetTokens:    new(big.Int).Set(m.retailNetTokens),
 		RetailLastBuyPx:    cloneFloat(m.retailLastBuyPx),
+		RetailAvgBuyPx:     priceWeiPerToken(m.retailBuyWeth, m.retailBuyTokens),
 		LastRetailBuyAt:    m.lastRetailBuyAt,
 		LastRetailSellAt:   m.lastRetailSellAt,
 		LastTradeAt:        m.lastTradeAt,
@@ -437,12 +446,17 @@ func (m *Monitor) onTrade(t pons.PoolTrade) {
 		if t.IsBuy {
 			m.retailNetTokens.Add(m.retailNetTokens, t.TokenAmount)
 			m.retailLastBuyPx = price
+			m.retailBuyWeth.Add(m.retailBuyWeth, t.WethAmount)
+			m.retailBuyTokens.Add(m.retailBuyTokens, t.TokenAmount)
 			m.lastRetailBuyAt = now
 		} else {
 			m.retailNetTokens.Sub(m.retailNetTokens, t.TokenAmount)
 			if m.retailNetTokens.Sign() <= 0 {
+				// Retail is flat again: the next buyer anchors a fresh average.
 				m.retailNetTokens.SetInt64(0)
 				m.retailLastBuyPx = nil
+				m.retailBuyWeth.SetInt64(0)
+				m.retailBuyTokens.SetInt64(0)
 			}
 			m.lastRetailSellAt = now
 		}

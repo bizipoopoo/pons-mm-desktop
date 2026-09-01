@@ -338,6 +338,8 @@ export namespace control {
 	    graduate: boolean;
 	    sellIntervalMs: number;
 	    sequentialSells: boolean;
+	    retailResponseMode: string;
+	    retailTargetRatio: number;
 	    slippageBps: number;
 	    priorityTipGwei: number;
 	    gasReserveEth: number;
@@ -369,6 +371,8 @@ export namespace control {
 	        this.graduate = source["graduate"];
 	        this.sellIntervalMs = source["sellIntervalMs"];
 	        this.sequentialSells = source["sequentialSells"];
+	        this.retailResponseMode = source["retailResponseMode"];
+	        this.retailTargetRatio = source["retailTargetRatio"];
 	        this.slippageBps = source["slippageBps"];
 	        this.priorityTipGwei = source["priorityTipGwei"];
 	        this.gasReserveEth = source["gasReserveEth"];

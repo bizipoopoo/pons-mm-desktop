@@ -21,6 +21,12 @@ const (
 	ProtocolV2 = "v2"
 )
 
+// Retail-response strategies for the unprofitable retail-buy case.
+const (
+	RetailResponseDistribute = "distribute"
+	RetailResponseTarget     = "target"
+)
+
 // Config is the full ponsmm configuration, loaded from YAML.
 type Config struct {
 	// Protocol selects the pons launch stack. Empty is treated as v1 for
@@ -61,6 +67,21 @@ type Config struct {
 	// engine clears 4-6 wallets per batch at SellInterval cadence.
 	SellInterval    time.Duration `yaml:"sell_interval"`    // minimum cadence between sell rounds (default 1s)
 	ConcurrentSells bool          `yaml:"concurrent_sells"` // clear wallets in each batch concurrently (default true)
+
+	// RetailResponse switches what happens when a retail buy arrives while the
+	// full-exit quote does NOT yet cover total costs (the profitable case
+	// always exits everything immediately, in both modes):
+	//   - "distribute" (default): the original strategy — clear wallets in
+	//     slow batches of 4-6 until retail sells or nothing is left.
+	//   - "target": act by RetailTargetRatio relative to the retail buyers'
+	//     average buy price (v2 curves only).
+	RetailResponse string `yaml:"retail_response"`
+	// RetailTargetRatio parameterizes the "target" response:
+	//   0     do nothing;
+	//   -0.1  sell whole wallets, adding one at a time, until the projected
+	//         curve price is pushed to avg*(1-0.1), then execute the batch;
+	//   +0.1  buy just enough to lift the curve price to avg*(1+0.1).
+	RetailTargetRatio float64 `yaml:"retail_target_ratio"`
 
 	// Execution.
 	SlippageBps     int64   `yaml:"slippage_bps"`      // buy slippage tolerance in bps (default 1500 = 15%); sells use 9999 bps
@@ -154,7 +175,28 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 	if c.GasReserveETH < 0 || c.PriorityTipGwei < 0 || c.DevBuyETH < 0 {
 		return fmt.Errorf("ETH and gas values must not be negative")
 	}
+	switch c.RetailResponseName() {
+	case RetailResponseDistribute:
+	case RetailResponseTarget:
+		if protocol != ProtocolV2 {
+			return fmt.Errorf("the price-target retail response requires the v2 bonding curve")
+		}
+		if c.RetailTargetRatio <= -1 || c.RetailTargetRatio > 10 {
+			return fmt.Errorf("retail_target_ratio must be in (-1, 10]")
+		}
+	default:
+		return fmt.Errorf("retail_response must be %q or %q", RetailResponseDistribute, RetailResponseTarget)
+	}
 	return nil
+}
+
+// RetailResponseName returns the normalized retail response strategy; empty
+// selects the original slow-distribution behavior.
+func (c *Config) RetailResponseName() string {
+	if c.RetailResponse == "" {
+		return RetailResponseDistribute
+	}
+	return c.RetailResponse
 }
 
 // ProtocolName returns the normalized protocol value.
