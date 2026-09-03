@@ -1,6 +1,7 @@
 package ponsmm
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 
@@ -80,5 +81,29 @@ func TestBundleConfigValidation(t *testing.T) {
 		if c.Bundling() {
 			t.Fatalf("%q should mean off", off)
 		}
+	}
+}
+
+func TestBundleBuySpendReservesGas(t *testing.T) {
+	gasReserve := ethToWei(0.002)
+	feeCap := big.NewInt(3_000_000_000) // 3 gwei
+	w := &Wallet{ETHWei: ethToWei(0.005)}
+
+	spend := bundleBuySpend(w, gasReserve, feeCap, bundleGasLimit, 1)
+	// 0.005 - 0.002 gas reserve - 400k*3gwei gas = 0.0018 ETH
+	want := ethToWei(0.0018)
+	if spend.Cmp(want) != 0 {
+		t.Fatalf("spend = %s want %s", weiToEthStr(spend), weiToEthStr(want))
+	}
+	gasCost := new(big.Int).Mul(feeCap, new(big.Int).SetUint64(bundleGasLimit))
+	total := new(big.Int).Add(spend, gasCost)
+	if total.Cmp(w.ETHWei) > 0 {
+		t.Fatalf("value+gas %s exceeds balance %s", weiToEthStr(total), weiToEthStr(w.ETHWei))
+	}
+
+	// Tight wallet: only gas reserve left after the tx's own gas.
+	w.ETHWei = ethToWei(0.0032)
+	if got := bundleBuySpend(w, gasReserve, feeCap, bundleGasLimit, 1); got.Sign() != 0 {
+		t.Fatalf("expected zero spend on tight wallet, got %s", weiToEthStr(got))
 	}
 }

@@ -68,30 +68,24 @@ func (e *Engine) prepareLaunchBundle(ctx context.Context, params pons.V2TokenPar
 	if !e.cfg.ConcurrentBuys && len(eligible) > 1 {
 		eligible = eligible[:1]
 	}
-	gasReserve := ethToWei(e.cfg.GasReserveETH)
-	// In window mode the buy is a separate transaction; the node rejects it
-	// when value + gasLimit*feeCap > balance, so we must deduct the worst-
-	// case gas cost from the spend. (In atomic mode the maker's deposit is
-	// a separate tx too, but ensureDeposits already handles that.)
-	_, feeCap, _ := e.client.SuggestGas(ctx, e.extraTipWei)
-	var buyGasCost *big.Int
-	if feeCap != nil {
-		buyGasCost = new(big.Int).Mul(feeCap, new(big.Int).SetUint64(bundleGasLimit))
-	} else {
-		buyGasCost = big.NewInt(0)
-	}
 	b := &launchBundle{mode: e.cfg.BundleModeName(), router: router, curve: curve, token: token,
 		window: uint64(e.cfg.BundleMaxBlocksOrDefault())}
 	for _, w := range eligible {
-		avail := w.spendableWei(gasReserve)
-		avail.Sub(avail, buyGasCost) // reserve room for the tx's own gas
-		spend := scaleWei(avail, e.cfg.BuyFraction)
-		if spend.Sign() <= 0 {
-			e.log.Debug("maker excluded from bundle: not enough ETH after gas reserve",
-				"wallet", w.Addr.Hex(), "balance", w.ETHWei, "gas_cost", buyGasCost)
-			continue
+		b.buys = append(b.buys, bundleBuy{wallet: w})
+	}
+	if b.mode == BundleAtomic {
+		// Deposits are sized here; ensureDeposits runs after RefreshETH.
+		gasReserve := ethToWei(e.cfg.GasReserveETH)
+		_, feeCap, _ := e.client.SuggestGas(ctx, e.extraTipWei)
+		kept := make([]bundleBuy, 0, len(b.buys))
+		for _, buy := range b.buys {
+			spend := bundleBuySpend(buy.wallet, gasReserve, feeCap, depositGasLimit, e.cfg.BuyFraction)
+			if spend.Sign() <= 0 {
+				continue
+			}
+			kept = append(kept, bundleBuy{wallet: buy.wallet, spend: spend})
 		}
-		b.buys = append(b.buys, bundleBuy{wallet: w, spend: spend})
+		b.buys = kept
 	}
 	e.log.Info("launch bundle prepared", "mode", b.mode,
 		"predicted_token", token.Hex(), "predicted_curve", curve.Hex(),
@@ -244,11 +238,45 @@ func wallets(buys []bundleBuy) []*Wallet {
 	return out
 }
 
+// bundleBuySpend is the ETH value a maker buy may carry once its own gas is
+// reserved. The node rejects a tx when value + gasLimit*feeCap > balance.
+func bundleBuySpend(w *Wallet, gasReserve, feeCap *big.Int, gasLimit uint64, buyFraction float64) *big.Int {
+	if feeCap == nil {
+		return big.NewInt(0)
+	}
+	gasCost := new(big.Int).Mul(feeCap, new(big.Int).SetUint64(gasLimit))
+	avail := w.spendableWei(gasReserve)
+	avail.Sub(avail, gasCost)
+	return scaleWei(avail, buyFraction)
+}
+
+// refreshWindowBuys recomputes each maker's spend from the wallet balances
+// that RefreshETH just read and the launch transaction's fee cap. Sizing must
+// happen here — not in prepareLaunchBundle — so value + gasLimit*feeCap fits
+// under balance when the batch is signed.
+func (b *launchBundle) refreshWindowBuys(e *Engine, feeCap *big.Int) {
+	gasReserve := ethToWei(e.cfg.GasReserveETH)
+	kept := make([]bundleBuy, 0, len(b.buys))
+	for _, buy := range b.buys {
+		spend := bundleBuySpend(buy.wallet, gasReserve, feeCap, bundleGasLimit, e.cfg.BuyFraction)
+		if spend.Sign() <= 0 {
+			e.log.Warn("maker excluded from launch bundle: balance cannot cover value+gas at the launch fee cap",
+				"wallet", buy.wallet.Addr.Hex(), "balance", buy.wallet.ETHWei,
+				"fee_cap", feeCap, "gas_limit", bundleGasLimit)
+			continue
+		}
+		kept = append(kept, bundleBuy{wallet: buy.wallet, spend: spend})
+	}
+	b.buys = kept
+}
+
 // sendWindow (window mode) signs one buyAfterLaunch per maker against the
 // predicted curve and broadcasts the launch and every buy in one JSON-RPC
 // batch. The launch is element 0 so the sequencer sees it first; a buy the
 // node rejects outright is dropped from the bundle.
 func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *types.Transaction, launchPr pons.TxParams) error {
+	b.refreshWindowBuys(e, launchPr.FeeCap)
+
 	locked := b.buys // b.buys is filtered below; unlock exactly what was locked
 	for _, buy := range locked {
 		buy.wallet.txMu.Lock()
@@ -287,7 +315,11 @@ func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *type
 	accepted := make([]bundleBuy, 0, len(b.buys))
 	for i, buy := range b.buys {
 		if err := errs[i+1]; err != nil {
-			e.log.Warn("bundle buy rejected by node", "wallet", buy.wallet.Addr.Hex(), "err", err)
+			gasCost := new(big.Int).Mul(launchPr.FeeCap, new(big.Int).SetUint64(bundleGasLimit))
+			e.log.Warn("bundle buy rejected by node",
+				"wallet", buy.wallet.Addr.Hex(), "value_eth", weiToEthStr(buy.spend),
+				"balance_eth", weiToEthStr(buy.wallet.ETHWei), "gas_cost_eth", weiToEthStr(gasCost),
+				"fee_cap", launchPr.FeeCap, "err", err)
 			if n, e2 := e.client.PendingNonce(ctx, buy.wallet.Addr); e2 == nil {
 				buy.wallet.Nonce = n
 			}

@@ -530,6 +530,12 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 				"predicted", bundle.curve.Hex(), "actual", launched.Curve.Hex())
 		}
 		burst = bundle.burst()
+		if len(burst) == 0 {
+			// Every bundled buy was dropped or rejected; do not wait for the
+			// accumulation loop — snipers are already in the next blocks.
+			e.log.Warn("no bundled maker buy was accepted; falling back to an immediate curve burst")
+			burst = e.launchBuyBurst(ctx, launched.Curve, pr)
+		}
 	case bundle != nil && bundle.mode == BundleAtomic:
 		e.log.Info("launch landed with atomic maker buys", "block", launched.Block, "makers", len(bundle.buys))
 	default:
