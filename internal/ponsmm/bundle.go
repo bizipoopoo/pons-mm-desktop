@@ -69,11 +69,26 @@ func (e *Engine) prepareLaunchBundle(ctx context.Context, params pons.V2TokenPar
 		eligible = eligible[:1]
 	}
 	gasReserve := ethToWei(e.cfg.GasReserveETH)
+	// In window mode the buy is a separate transaction; the node rejects it
+	// when value + gasLimit*feeCap > balance, so we must deduct the worst-
+	// case gas cost from the spend. (In atomic mode the maker's deposit is
+	// a separate tx too, but ensureDeposits already handles that.)
+	_, feeCap, _ := e.client.SuggestGas(ctx, e.extraTipWei)
+	var buyGasCost *big.Int
+	if feeCap != nil {
+		buyGasCost = new(big.Int).Mul(feeCap, new(big.Int).SetUint64(bundleGasLimit))
+	} else {
+		buyGasCost = big.NewInt(0)
+	}
 	b := &launchBundle{mode: e.cfg.BundleModeName(), router: router, curve: curve, token: token,
 		window: uint64(e.cfg.BundleMaxBlocksOrDefault())}
 	for _, w := range eligible {
-		spend := scaleWei(w.spendableWei(gasReserve), e.cfg.BuyFraction)
+		avail := w.spendableWei(gasReserve)
+		avail.Sub(avail, buyGasCost) // reserve room for the tx's own gas
+		spend := scaleWei(avail, e.cfg.BuyFraction)
 		if spend.Sign() <= 0 {
+			e.log.Debug("maker excluded from bundle: not enough ETH after gas reserve",
+				"wallet", w.Addr.Hex(), "balance", w.ETHWei, "gas_cost", buyGasCost)
 			continue
 		}
 		b.buys = append(b.buys, bundleBuy{wallet: w, spend: spend})
