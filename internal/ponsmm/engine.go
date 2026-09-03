@@ -388,6 +388,18 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		return err
 	}
 	e.captureStartBalance()
+	// A bundle pre-signs every maker buy against the CREATE2-predicted curve
+	// so the buys leave in the same batch as the launch instead of one
+	// receipt-wait later. Prepared before gas is quoted so the head tracker
+	// and prediction reads do not age the gas params.
+	var bundle *launchBundle
+	if e.cfg.BundleBuys {
+		bundle, err = e.prepareLaunchBundle(ctx, params, pairToken, who)
+		if err != nil {
+			return fmt.Errorf("prepare launch bundle: %w", err)
+		}
+		defer bundle.close()
+	}
 	pr, err := e.pool.txParams(ctx, e.pool.Treasury, gasLimit, e.extraTipWei)
 	if err != nil {
 		return err
@@ -402,7 +414,11 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	if err != nil {
 		return fmt.Errorf("build v2 launch: %w", err)
 	}
-	if err := e.pool.send(ctx, e.pool.Treasury, tx); err != nil {
+	if bundle != nil {
+		if err := bundle.send(ctx, e, tx, pr); err != nil {
+			return fmt.Errorf("send v2 launch bundle: %w", err)
+		}
+	} else if err := e.pool.send(ctx, e.pool.Treasury, tx); err != nil {
 		return fmt.Errorf("send v2 launch: %w", err)
 	}
 	e.log.Info("v2 launch submitted", "tx", tx.Hash().Hex())
@@ -414,10 +430,28 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	if !ok {
 		return fmt.Errorf("v2 launch receipt %s carried no TokenLaunched event", tx.Hash().Hex())
 	}
-	// Broadcast the first maker buys before anything else touches the RPC:
-	// every millisecond here is a block on this chain, and launch snipers are
-	// already racing us.
-	burst := e.launchBuyBurst(ctx, launched.Curve, pr)
+	var burst []launchBurstBuy
+	if bundle != nil {
+		// The launch left in the same batch as the buys, so its distance from
+		// the head we saw at send time is our end-to-end latency in blocks:
+		// the window must be at least this wide for any bundled buy to fill.
+		e.log.Info("launch landed", "block", launched.Block, "head_at_send", bundle.sentAt,
+			"blocks_after_send", int64(launched.Block)-int64(bundle.sentAt),
+			"window_blocks", e.cfg.BundleMaxBlocksOrDefault(), "max_l2_block", bundle.maxBlock)
+		if launched.Curve != bundle.curve {
+			// The buys were signed against the prediction; a mismatch means
+			// they will revert against an empty address. Keep running on the
+			// real curve, the makers simply join via normal accumulation.
+			e.log.Error("predicted curve does not match the launched curve; bundled buys will not fill",
+				"predicted", bundle.curve.Hex(), "actual", launched.Curve.Hex())
+		}
+		burst = bundle.burst()
+	} else {
+		// Broadcast the first maker buys before anything else touches the RPC:
+		// every millisecond here is a block on this chain, and launch snipers are
+		// already racing us.
+		burst = e.launchBuyBurst(ctx, launched.Curve, pr)
+	}
 	e.recordLaunchCost(fee, rcpt)
 	e.log.Info("v2 token launched", "token", launched.Token.Hex(), "curve", launched.Curve.Hex(), "block", launched.Block)
 	// Bind from data we already hold instead of re-reading the chain: the
@@ -448,16 +482,21 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 			if err := e.ensureApprove(ctx, b.wallet, big.NewInt(1), false); err != nil {
 				e.log.Warn("sell approval prewarm after burst buy failed", "wallet", b.wallet.Addr.Hex(), "err", err)
 			}
-			e.settleBuy(ctx, b.wallet, b.spend, big.NewInt(0), b.hash)
+			if b.bundled {
+				e.settleBundledBuy(ctx, bundle, b.wallet, b.spend, b.hash, launched.Block)
+			} else {
+				e.settleBuy(ctx, b.wallet, b.spend, big.NewInt(0), b.hash)
+			}
 		}(b)
 	}
 	return nil
 }
 
 type launchBurstBuy struct {
-	wallet *Wallet
-	spend  *big.Int
-	hash   common.Hash
+	wallet  *Wallet
+	spend   *big.Int
+	hash    common.Hash
+	bundled bool // routed through the block-limited router as part of the launch batch
 }
 
 // launchBuyBurst broadcasts the first maker buys the instant the launch
@@ -1248,6 +1287,14 @@ func (e *Engine) settleBuy(ctx context.Context, w *Wallet, wethIn, before *big.I
 	rcpt, err := e.client.WaitReceipt(ctx, txHash, 90*time.Second)
 	if err != nil {
 		settled.err = fmt.Errorf("buy confirm: %w", err)
+	} else if rcpt.Status != types.ReceiptStatusSuccessful {
+		// A reverted buy spent gas but no ETH on tokens; counting it as a buy
+		// would inflate the round's spend.
+		e.recordGas(rcpt)
+		settled.err = fmt.Errorf("buy reverted on-chain (block %d)", rcpt.BlockNumber.Uint64())
+		if bal, balErr := e.client.EthBalance(ctx, w.Addr); balErr == nil {
+			w.setETHBalance(bal)
+		}
 	} else {
 		e.recordGas(rcpt)
 		got := big.NewInt(0)

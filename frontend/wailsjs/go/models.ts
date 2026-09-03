@@ -331,6 +331,8 @@ export namespace control {
 	    launchConfigId: number;
 	    dexId: number;
 	    devBuyEth: number;
+	    bundleBuys: boolean;
+	    bundleMaxBlocks: number;
 	    buyFraction: number;
 	    accumulateIntervalMs: number;
 	    concurrentBuys: boolean;
@@ -364,6 +366,8 @@ export namespace control {
 	        this.launchConfigId = source["launchConfigId"];
 	        this.dexId = source["dexId"];
 	        this.devBuyEth = source["devBuyEth"];
+	        this.bundleBuys = source["bundleBuys"];
+	        this.bundleMaxBlocks = source["bundleMaxBlocks"];
 	        this.buyFraction = source["buyFraction"];
 	        this.accumulateIntervalMs = source["accumulateIntervalMs"];
 	        this.concurrentBuys = source["concurrentBuys"];
@@ -401,6 +405,7 @@ export namespace control {
 	export class Settings {
 	    rpcEndpoint: string;
 	    gmgnViewerWallet: string;
+	    mmRouter: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -410,6 +415,7 @@ export namespace control {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.rpcEndpoint = source["rpcEndpoint"];
 	        this.gmgnViewerWallet = source["gmgnViewerWallet"];
+	        this.mmRouter = source["mmRouter"];
 	    }
 	}
 	export class Bootstrap {

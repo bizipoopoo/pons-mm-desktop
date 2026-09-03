@@ -124,6 +124,10 @@ func (s *Service) SaveSettings(settings Settings) error {
 	if settings.GMGNViewerWallet != "" && !common.IsHexAddress(settings.GMGNViewerWallet) {
 		return errors.New("GMGN viewer wallet is not a valid EVM address")
 	}
+	settings.MMRouter = strings.TrimSpace(settings.MMRouter)
+	if settings.MMRouter != "" && !common.IsHexAddress(settings.MMRouter) {
+		return errors.New("block-limited router contract is not a valid EVM address")
+	}
 	if err := s.config.saveSettings(settings); err != nil {
 		return err
 	}

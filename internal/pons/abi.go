@@ -26,6 +26,21 @@ const (
 	// launch. The buy recipient is snipe-tax-exempt automatically.
 	// Documented under Contracts at https://docs.ponsfamily.com/v2.
 	LaunchAndBuyRouter = "0xe33E9E479dF8802cb0866d5d05258bEc4cF62948"
+	// LaunchDeployer is the CREATE2 helper that stands up each curve/token pair
+	// for the factory. predictLaunchAddresses lives here (not on the factory).
+	LaunchDeployer = "0x3711ceA4feaDE896C913C68F01Eda97Cb06D1A42"
+	// MemeHook is the shared fee-policy source snapshotted into every launch.
+	MemeHook = "0xE5e702641Ea86F4ae6cC3cDaeD2B886f976Be044"
+	// FeeEscrowAddress / BuybackVaultAddress are factory wiring targets that
+	// become part of the CREATE2 initcode (and therefore the predicted address).
+	FeeEscrowAddress    = FeeEscrow
+	BuybackVaultAddress = "0x42df2a798f82289E177311362e8f5ccC45c1219c"
+	// MMRouter is OUR block-height-limited buy router (contracts/src/
+	// PonsMMRouter.sol, UUPS proxy owned by the deploying key). Launch bundles
+	// send maker buys through buyWithin(curve, maxL2Block, recipient), which
+	// reverts once ArbSys.arbBlockNumber() passes maxL2Block instead of
+	// filling late. Settings may override this default.
+	MMRouter = "0x1119cDed80b82CA4d732fD1bB20c13f5e9425F60"
 
 	// RobinhoodChainID is the Robinhood Chain mainnet chain id.
 	RobinhoodChainID = 4663
@@ -81,7 +96,61 @@ const (
 		{"name":"launchConfigId","type":"uint256"},
 		{"name":"pairToken","type":"address"},
 		{"name":"snipeTaxExemptions","type":"address[]"}],
-	"name":"launchToken","outputs":[{"name":"token","type":"address"},{"name":"curve","type":"address"}],"stateMutability":"payable","type":"function"}
+	"name":"launchToken","outputs":[{"name":"token","type":"address"},{"name":"curve","type":"address"}],"stateMutability":"payable","type":"function"},
+	{"inputs":[],"name":"launchDeployer","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"memeHook","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"feeEscrow","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"buybackVault","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}
+]`
+
+	// deployerABIJSON is PonsV2LaunchDeployer's public surface. The FeePolicy
+	// tuple shape was recovered from the live bytecode dispatcher selector
+	// 0x2bc63e61 against the openchain signature database.
+	deployerABIJSON = `[
+	{"inputs":[{"components":[
+		{"name":"pairToken","type":"address"},
+		{"name":"creatorFeeRecipient","type":"address"},
+		{"name":"originalDeployer","type":"address"},
+		{"name":"feePolicy","type":"address"},
+		{"components":[
+			{"name":"protocolFeeRecipient","type":"address"},
+			{"name":"protocolFeeShareBps","type":"uint16"},
+			{"name":"buybackBurnBps","type":"uint16"},
+			{"name":"hookFeeBps","type":"uint16"},
+			{"name":"maxInternalPriceImpactBps","type":"uint16"}],
+		"name":"policy","type":"tuple"},
+		{"name":"feeEscrow","type":"address"},
+		{"name":"buybackVault","type":"address"},
+		{"name":"phantomQuote","type":"uint256"},
+		{"name":"curveFeeBps","type":"uint256"},
+		{"name":"creatorTaxBps","type":"uint256"},
+		{"name":"buybackEnabled","type":"bool"},
+		{"name":"graduationThreshold","type":"uint256"},
+		{"name":"supply","type":"uint256"},
+		{"name":"salt","type":"bytes32"},
+		{"name":"name","type":"string"},
+		{"name":"symbol","type":"string"},
+		{"name":"logo","type":"string"},
+		{"name":"description","type":"string"},
+		{"components":[
+			{"name":"twitter","type":"string"},
+			{"name":"telegram","type":"string"},
+			{"name":"discord","type":"string"},
+			{"name":"website","type":"string"},
+			{"name":"farcaster","type":"string"}],
+		"name":"socials","type":"tuple"}],
+	"name":"params","type":"tuple"}],
+	"name":"predictLaunchAddresses","outputs":[{"name":"token","type":"address"},{"name":"curve","type":"address"}],"stateMutability":"view","type":"function"}
+]`
+
+	memeHookABIJSON = `[
+	{"inputs":[],"name":"currentFeePolicy","outputs":[{"components":[
+		{"name":"protocolFeeRecipient","type":"address"},
+		{"name":"protocolFeeShareBps","type":"uint16"},
+		{"name":"buybackBurnBps","type":"uint16"},
+		{"name":"hookFeeBps","type":"uint16"},
+		{"name":"maxInternalPriceImpactBps","type":"uint16"}],
+	"name":"","type":"tuple"}],"stateMutability":"view","type":"function"}
 ]`
 
 	// routerABIJSON carries the launch-and-buy router's single method. The
@@ -146,6 +215,23 @@ const (
 	"name":"CurveSell","type":"event"}
 ]`
 
+	mmRouterABIJSON = `[
+	{"inputs":[{"name":"curve","type":"address"},{"name":"maxL2Block","type":"uint256"},{"name":"recipient","type":"address"}],"name":"buyWithin","outputs":[{"name":"tokensOut","type":"uint256"}],"stateMutability":"payable","type":"function"},
+	{"inputs":[],"name":"currentL2Block","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"owner","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"currentL2Block","type":"uint256"},{"name":"maxL2Block","type":"uint256"}],"name":"Expired","type":"error"},
+	{"anonymous":false,"inputs":[
+		{"indexed":true,"name":"caller","type":"address"},
+		{"indexed":true,"name":"curve","type":"address"},
+		{"indexed":true,"name":"recipient","type":"address"},
+		{"indexed":false,"name":"quoteIn","type":"uint256"},
+		{"indexed":false,"name":"tokensOut","type":"uint256"},
+		{"indexed":false,"name":"refunded","type":"uint256"},
+		{"indexed":false,"name":"l2Block","type":"uint256"},
+		{"indexed":false,"name":"maxL2Block","type":"uint256"}],
+	"name":"RoutedBuy","type":"event"}
+]`
+
 	erc20ABIJSON = `[
 	{"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"stateMutability":"view","type":"function"},
@@ -158,10 +244,13 @@ const (
 )
 
 var (
-	factoryABI = mustABI(factoryABIJSON)
-	routerABI  = mustABI(routerABIJSON)
-	curveABI   = mustABI(curveABIJSON)
-	erc20ABI   = mustABI(erc20ABIJSON)
+	factoryABI  = mustABI(factoryABIJSON)
+	deployerABI = mustABI(deployerABIJSON)
+	memeHookABI = mustABI(memeHookABIJSON)
+	routerABI   = mustABI(routerABIJSON)
+	mmRouterABI = mustABI(mmRouterABIJSON)
+	curveABI    = mustABI(curveABIJSON)
+	erc20ABI    = mustABI(erc20ABIJSON)
 
 	// tokenLaunchedTopic is the keccak topic0 of TokenLaunched, used to filter
 	// factory logs.

@@ -14,6 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/bizipoopoo/pons-mm-desktop/internal/pons"
 )
 
 const (
@@ -54,6 +56,16 @@ type Config struct {
 	// through the official launch-and-buy router so the treasury's first buy
 	// cannot be front-run by launch snipers.
 	DevBuyETH float64 `yaml:"dev_buy_eth"`
+
+	// BundleBuys (v2 only) pre-signs one buy per funded maker against the
+	// CREATE2-predicted curve and broadcasts them in the same JSON-RPC batch
+	// as the launch, through our block-height-limited router. Those buys have
+	// NO slippage bound; they either land within BundleMaxBlocks L2 blocks of
+	// submission or revert (Expired) and the wallet keeps its ETH for the
+	// normal accumulation path.
+	BundleBuys      bool   `yaml:"bundle_buys"`
+	BundleMaxBlocks int    `yaml:"bundle_max_blocks"` // window in L2 blocks (~100ms each), default 3
+	MMRouter        string `yaml:"mm_router"`         // PonsMMRouter proxy; empty uses the built-in default
 
 	// Accumulation.
 	BuyFraction        float64       `yaml:"buy_fraction"`        // fraction of a wallet's spendable ETH per buy (default 0.99)
@@ -117,6 +129,7 @@ func DefaultConfig() Config {
 		BuyFraction:        0.99,
 		AccumulateInterval: 100 * time.Millisecond,
 		ConcurrentBuys:     true,
+		BundleMaxBlocks:    DefaultBundleMaxBlocks,
 		ChipTarget:         0.9,
 		Graduate:           true,
 		SellInterval:       time.Second,
@@ -187,7 +200,42 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 	default:
 		return fmt.Errorf("retail_response must be %q or %q", RetailResponseDistribute, RetailResponseTarget)
 	}
+	if c.BundleBuys {
+		if protocol != ProtocolV2 {
+			return fmt.Errorf("bundled launch buys require the v2 bonding curve")
+		}
+		if c.MMRouter != "" && !common.IsHexAddress(c.MMRouter) {
+			return fmt.Errorf("mm_router is not a valid address: %q", c.MMRouter)
+		}
+		if n := c.BundleMaxBlocksOrDefault(); n < 1 || n > MaxBundleMaxBlocks {
+			return fmt.Errorf("bundle_max_blocks must be in [1, %d]", MaxBundleMaxBlocks)
+		}
+	}
 	return nil
+}
+
+// Bundle window bounds. One L2 block is ~100ms on Robinhood Chain; a window
+// longer than 50 blocks (~5s) no longer protects against anything.
+const (
+	DefaultBundleMaxBlocks = 3
+	MaxBundleMaxBlocks     = 50
+)
+
+// BundleMaxBlocksOrDefault returns the bundle window, defaulting to 3 blocks.
+func (c *Config) BundleMaxBlocksOrDefault() int {
+	if c.BundleMaxBlocks <= 0 {
+		return DefaultBundleMaxBlocks
+	}
+	return c.BundleMaxBlocks
+}
+
+// MMRouterAddr returns the block-limited router to route bundled buys through:
+// the configured override or the built-in deployment.
+func (c *Config) MMRouterAddr() common.Address {
+	if common.IsHexAddress(c.MMRouter) {
+		return common.HexToAddress(c.MMRouter)
+	}
+	return common.HexToAddress(pons.MMRouter)
 }
 
 // RetailResponseName returns the normalized retail response strategy; empty

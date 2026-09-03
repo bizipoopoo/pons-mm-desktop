@@ -48,6 +48,194 @@ type V2LaunchConfig struct {
 	Enabled             bool
 }
 
+// FeePolicySnapshot is the meme-hook fee policy frozen into a launch's CREATE2
+// initcode. Changing any field changes the predicted curve/token addresses.
+type FeePolicySnapshot struct {
+	ProtocolFeeRecipient     common.Address
+	ProtocolFeeShareBps      uint16
+	BuybackBurnBps           uint16
+	HookFeeBps               uint16
+	MaxInternalPriceImpactBps uint16
+}
+
+// V2LaunchDeployment is the exact CREATE2 input the launch deployer hashes.
+// It mirrors PonsV2LaunchDeployer's LaunchDeployment struct.
+type V2LaunchDeployment struct {
+	PairToken           common.Address
+	CreatorFeeRecipient common.Address
+	OriginalDeployer    common.Address
+	FeePolicy           common.Address
+	Policy              FeePolicySnapshot
+	FeeEscrow           common.Address
+	BuybackVault        common.Address
+	PhantomQuote        *big.Int
+	CurveFeeBps         *big.Int
+	CreatorTaxBps       *big.Int
+	BuybackEnabled      bool
+	GraduationThreshold *big.Int
+	Supply              *big.Int
+	Salt                [32]byte
+	Name                string
+	Symbol              string
+	Logo                string
+	Description         string
+	Socials             V2Socials
+}
+
+// PredictV2LaunchAddresses returns the CREATE2 token and curve addresses a
+// launch with these terms would deploy to, without sending a transaction.
+// originalDeployer is the wallet that will call launchToken (or the router
+// forwarder's declared originalDeployer for launchAndBuy).
+func (c *Client) PredictV2LaunchAddresses(ctx context.Context, params V2TokenParams, launchConfigID uint64, pairToken, originalDeployer common.Address) (token, curve common.Address, err error) {
+	dep, err := c.BuildV2LaunchDeployment(ctx, params, launchConfigID, pairToken, originalDeployer)
+	if err != nil {
+		return common.Address{}, common.Address{}, err
+	}
+	return c.PredictV2LaunchDeployment(ctx, dep)
+}
+
+// PredictV2LaunchDeployment calls the on-chain launch deployer view.
+func (c *Client) PredictV2LaunchDeployment(ctx context.Context, dep V2LaunchDeployment) (token, curve common.Address, err error) {
+	deployer, err := c.V2LaunchDeployer(ctx)
+	if err != nil {
+		return common.Address{}, common.Address{}, err
+	}
+	data, err := deployerABI.Pack("predictLaunchAddresses", dep)
+	if err != nil {
+		return common.Address{}, common.Address{}, fmt.Errorf("pack predictLaunchAddresses: %w", err)
+	}
+	res, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &deployer, Data: data}, nil)
+	if err != nil {
+		return common.Address{}, common.Address{}, fmt.Errorf("predictLaunchAddresses: %w", err)
+	}
+	out, err := deployerABI.Unpack("predictLaunchAddresses", res)
+	if err != nil || len(out) < 2 {
+		return common.Address{}, common.Address{}, fmt.Errorf("unpack predictLaunchAddresses: %v", err)
+	}
+	token = *abi.ConvertType(out[0], new(common.Address)).(*common.Address)
+	curve = *abi.ConvertType(out[1], new(common.Address)).(*common.Address)
+	return token, curve, nil
+}
+
+// BuildV2LaunchDeployment assembles the CREATE2 input the factory would hand
+// the deployer for these launch terms, reading live config and fee policy.
+func (c *Client) BuildV2LaunchDeployment(ctx context.Context, params V2TokenParams, launchConfigID uint64, pairToken, originalDeployer common.Address) (V2LaunchDeployment, error) {
+	cfg, err := c.GetV2LaunchConfig(ctx, launchConfigID)
+	if err != nil {
+		return V2LaunchDeployment{}, err
+	}
+	if !cfg.Enabled {
+		return V2LaunchDeployment{}, fmt.Errorf("launch config %d is disabled", launchConfigID)
+	}
+	hook, err := c.V2MemeHook(ctx)
+	if err != nil {
+		return V2LaunchDeployment{}, err
+	}
+	policy, err := c.CurrentFeePolicy(ctx, hook)
+	if err != nil {
+		return V2LaunchDeployment{}, err
+	}
+	escrow, err := c.V2FeeEscrow(ctx)
+	if err != nil {
+		return V2LaunchDeployment{}, err
+	}
+	vault, err := c.V2BuybackVault(ctx)
+	if err != nil {
+		return V2LaunchDeployment{}, err
+	}
+	creator := params.CreatorFeeRecipient
+	if creator == (common.Address{}) {
+		creator = originalDeployer
+	}
+	phantom, threshold := cfg.PhantomQuote, cfg.GraduationThreshold
+	if pairToken != (common.Address{}) {
+		return V2LaunchDeployment{}, fmt.Errorf("custom pairToken launches are not supported by PredictV2 yet")
+	}
+	return V2LaunchDeployment{
+		PairToken:           pairToken,
+		CreatorFeeRecipient: creator,
+		OriginalDeployer:    originalDeployer,
+		FeePolicy:           hook,
+		Policy:              policy,
+		FeeEscrow:           escrow,
+		BuybackVault:        vault,
+		PhantomQuote:        phantom,
+		CurveFeeBps:         cfg.CurveFeeBps,
+		CreatorTaxBps:       big.NewInt(int64(params.CreatorTaxBps)),
+		BuybackEnabled:      params.BuybackEnabled,
+		GraduationThreshold: threshold,
+		Supply:              cfg.Supply,
+		Salt:                params.Salt,
+		Name:                params.Name,
+		Symbol:              params.Symbol,
+		Logo:                params.Logo,
+		Description:         params.Description,
+		Socials:             params.Socials,
+	}, nil
+}
+
+func (c *Client) V2LaunchDeployer(ctx context.Context) (common.Address, error) {
+	var addr common.Address
+	if err := c.callView(ctx, common.HexToAddress(LaunchFactory), &factoryABI, &addr, "launchDeployer"); err != nil {
+		return common.HexToAddress(LaunchDeployer), nil // fall back to documented address
+	}
+	if addr == (common.Address{}) {
+		return common.HexToAddress(LaunchDeployer), nil
+	}
+	return addr, nil
+}
+
+func (c *Client) V2MemeHook(ctx context.Context) (common.Address, error) {
+	var addr common.Address
+	if err := c.callView(ctx, common.HexToAddress(LaunchFactory), &factoryABI, &addr, "memeHook"); err != nil {
+		return common.HexToAddress(MemeHook), nil
+	}
+	if addr == (common.Address{}) {
+		return common.HexToAddress(MemeHook), nil
+	}
+	return addr, nil
+}
+
+func (c *Client) V2FeeEscrow(ctx context.Context) (common.Address, error) {
+	var addr common.Address
+	if err := c.callView(ctx, common.HexToAddress(LaunchFactory), &factoryABI, &addr, "feeEscrow"); err != nil {
+		return common.HexToAddress(FeeEscrow), nil
+	}
+	if addr == (common.Address{}) {
+		return common.HexToAddress(FeeEscrow), nil
+	}
+	return addr, nil
+}
+
+func (c *Client) V2BuybackVault(ctx context.Context) (common.Address, error) {
+	var addr common.Address
+	if err := c.callView(ctx, common.HexToAddress(LaunchFactory), &factoryABI, &addr, "buybackVault"); err != nil {
+		return common.HexToAddress(BuybackVaultAddress), nil
+	}
+	if addr == (common.Address{}) {
+		return common.HexToAddress(BuybackVaultAddress), nil
+	}
+	return addr, nil
+}
+
+func (c *Client) CurrentFeePolicy(ctx context.Context, hook common.Address) (FeePolicySnapshot, error) {
+	var policy FeePolicySnapshot
+	data, err := memeHookABI.Pack("currentFeePolicy")
+	if err != nil {
+		return policy, err
+	}
+	res, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &hook, Data: data}, nil)
+	if err != nil {
+		return policy, fmt.Errorf("currentFeePolicy: %w", err)
+	}
+	out, err := memeHookABI.Unpack("currentFeePolicy", res)
+	if err != nil || len(out) == 0 {
+		return policy, fmt.Errorf("unpack currentFeePolicy: %v", err)
+	}
+	policy = *abi.ConvertType(out[0], new(FeePolicySnapshot)).(*FeePolicySnapshot)
+	return policy, nil
+}
+
 func (c *Client) CanLaunchV2(ctx context.Context, who common.Address) (bool, error) {
 	var can bool
 	if err := c.callView(ctx, common.HexToAddress(LaunchFactory), &factoryABI, &can, "canLaunch", who); err != nil {

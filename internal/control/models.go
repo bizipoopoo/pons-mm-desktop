@@ -20,6 +20,9 @@ const (
 type Settings struct {
 	RPCEndpoint      string `json:"rpcEndpoint"`
 	GMGNViewerWallet string `json:"gmgnViewerWallet"`
+	// MMRouter is the block-height-limited buy router (PonsMMRouter proxy)
+	// that bundled launch buys go through. Empty uses the built-in deployment.
+	MMRouter string `json:"mmRouter"`
 }
 
 type Socials struct {
@@ -54,6 +57,8 @@ type Strategy struct {
 	LaunchConfigID       uint64    `json:"launchConfigId"`
 	DexID                uint64    `json:"dexId"`
 	DevBuyETH            float64   `json:"devBuyEth"`
+	BundleBuys           bool      `json:"bundleBuys"`
+	BundleMaxBlocks      int       `json:"bundleMaxBlocks"`
 	BuyFraction          float64   `json:"buyFraction"`
 	AccumulateIntervalMS int64     `json:"accumulateIntervalMs"`
 	ConcurrentBuys       bool      `json:"concurrentBuys"`
@@ -76,6 +81,8 @@ func NewStrategy() Strategy {
 		Mode:                 ModeExisting,
 		Protocol:             ponsmm.ProtocolV2,
 		Enabled:              true,
+		BundleBuys:           false,
+		BundleMaxBlocks:      ponsmm.DefaultBundleMaxBlocks,
 		BuyFraction:          0.99,
 		AccumulateIntervalMS: 100,
 		ConcurrentBuys:       true,
@@ -109,6 +116,9 @@ func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
 		LaunchConfigID:     s.LaunchConfigID,
 		DexID:              s.DexID,
 		DevBuyETH:          s.DevBuyETH,
+		BundleBuys:         s.BundleBuys,
+		BundleMaxBlocks:    s.BundleMaxBlocks,
+		MMRouter:           strings.TrimSpace(settings.MMRouter),
 		BuyFraction:        s.BuyFraction,
 		AccumulateInterval: time.Duration(s.AccumulateIntervalMS) * time.Millisecond,
 		ConcurrentBuys:     s.ConcurrentBuys,
@@ -143,6 +153,12 @@ func (s Strategy) validate(settings Settings) error {
 	}
 	if s.Mode == ModeExisting && (!common.IsHexAddress(s.TokenAddress) || !common.IsHexAddress(s.PoolAddress)) {
 		return errors.New("existing strategy requires valid token and pool addresses")
+	}
+	if s.BundleBuys && s.Mode != ModeLaunch {
+		return errors.New("bundled buys only apply to a launch strategy")
+	}
+	if r := strings.TrimSpace(settings.MMRouter); r != "" && !common.IsHexAddress(r) {
+		return fmt.Errorf("settings: block-limited router %q is not a valid address", r)
 	}
 	cfg := s.engineConfig(settings)
 	if err := cfg.Validate(s.Mode == ModeLaunch); err != nil {
