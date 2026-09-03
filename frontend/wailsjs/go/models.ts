@@ -331,7 +331,7 @@ export namespace control {
 	    launchConfigId: number;
 	    dexId: number;
 	    devBuyEth: number;
-	    bundleBuys: boolean;
+	    bundleMode: string;
 	    bundleMaxBlocks: number;
 	    buyFraction: number;
 	    accumulateIntervalMs: number;
@@ -366,7 +366,7 @@ export namespace control {
 	        this.launchConfigId = source["launchConfigId"];
 	        this.dexId = source["dexId"];
 	        this.devBuyEth = source["devBuyEth"];
-	        this.bundleBuys = source["bundleBuys"];
+	        this.bundleMode = source["bundleMode"];
 	        this.bundleMaxBlocks = source["bundleMaxBlocks"];
 	        this.buyFraction = source["buyFraction"];
 	        this.accumulateIntervalMs = source["accumulateIntervalMs"];

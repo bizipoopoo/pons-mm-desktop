@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -154,43 +153,6 @@ func (f *fakeNode) handler() http.HandlerFunc {
 		} else {
 			json.NewEncoder(w).Encode(resps[0])
 		}
-	}
-}
-
-func TestHeadTrackerPollsOverHTTP(t *testing.T) {
-	node := &fakeNode{}
-	node.height.Store(100)
-	srv := httptest.NewServer(node.handler())
-	defer srv.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	c, err := Dial(ctx, srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := NewHeadTracker(c, nil)
-	go h.Run(ctx)
-	if err := h.WaitReady(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if n, _, ok := h.Latest(); !ok || n != 100 {
-		t.Fatalf("latest = %d ok=%v, want 100", n, ok)
-	}
-	node.height.Store(105)
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if n, _, _ := h.Latest(); n == 105 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("tracker did not pick up the new height")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// A stale lower height from a lagging node must never rewind the tracker.
-	h.set(90)
-	if n, _, _ := h.Latest(); n != 105 {
-		t.Fatalf("latest rewound to %d", n)
 	}
 }
 

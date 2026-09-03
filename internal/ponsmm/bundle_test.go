@@ -13,7 +13,7 @@ func bundleConfig() Config {
 	c := DefaultConfig()
 	c.RPCEndpoint = "wss://example"
 	c.Token.Name, c.Token.Symbol = "T", "T"
-	c.BundleBuys = true
+	c.BundleMode = BundleWindow
 	return c
 }
 
@@ -53,12 +53,32 @@ func TestBundleConfigValidation(t *testing.T) {
 		t.Fatalf("oversized window should be rejected, got %v", err)
 	}
 
-	// Bundling off: the window and router are ignored even when malformed.
+	// Atomic mode has no window: an out-of-range value is irrelevant.
 	c = bundleConfig()
-	c.BundleBuys = false
-	c.MMRouter = "junk"
+	c.BundleMode = BundleAtomic
 	c.BundleMaxBlocks = 999
 	if err := c.Validate(true); err != nil {
-		t.Fatalf("disabled bundle must not validate its parameters: %v", err)
+		t.Fatalf("atomic mode must ignore the window: %v", err)
+	}
+
+	c = bundleConfig()
+	c.BundleMode = "sometimes"
+	if err := c.Validate(true); err == nil || !strings.Contains(err.Error(), "bundle_mode") {
+		t.Fatalf("unknown mode should be rejected, got %v", err)
+	}
+
+	// Bundling off (empty or "none"): the window and router are ignored even
+	// when malformed.
+	for _, off := range []string{"", "none", "off"} {
+		c = bundleConfig()
+		c.BundleMode = off
+		c.MMRouter = "junk"
+		c.BundleMaxBlocks = 999
+		if err := c.Validate(true); err != nil {
+			t.Fatalf("disabled bundle %q must not validate its parameters: %v", off, err)
+		}
+		if c.Bundling() {
+			t.Fatalf("%q should mean off", off)
+		}
 	}
 }

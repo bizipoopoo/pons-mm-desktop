@@ -96,8 +96,8 @@ type Engine struct {
 	// freshLaunch marks a token this engine launched itself: balances are fully
 	// known without chain reads, so Run's startup refreshes need not block the
 	// event loop.
-	freshLaunch bool
-	exitAllRequests  chan chan error
+	freshLaunch     bool
+	exitAllRequests chan chan error
 
 	retailResponseActive bool
 
@@ -311,12 +311,19 @@ func (e *Engine) ensureLaunchFunds(ctx context.Context, value *big.Int, gasLimit
 
 func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	who := e.pool.Treasury.Addr
-	can, err := e.client.CanLaunchV2(ctx, who)
+	// A bundled launch runs through our router, so the official contracts
+	// see the router as the deployer: preflight it, not the treasury.
+	bundleMode := e.cfg.BundleModeName()
+	deployer := who
+	if bundleMode != BundleOff {
+		deployer = e.cfg.MMRouterAddr()
+	}
+	can, err := e.client.CanLaunchV2(ctx, deployer)
 	if err != nil {
 		return fmt.Errorf("v2 canLaunch preflight: %w", err)
 	}
 	if !can {
-		return fmt.Errorf("wallet %s may not launch through pons v2 right now", who.Hex())
+		return fmt.Errorf("deployer %s may not launch through pons v2 right now", deployer.Hex())
 	}
 	fee, err := e.client.V2LaunchFee(ctx)
 	if err != nil {
@@ -355,12 +362,17 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		ExpectedEconomics:   economics,
 		Salt:                salt,
 	}
-	exemptions := make([]common.Address, 0, len(e.pool.Makers))
+	exemptions := make([]common.Address, 0, len(e.pool.Makers)+1)
+	if deployer != who {
+		// The factory only auto-exempts the deployer and the creator fee
+		// recipient; behind the router the treasury must be listed explicitly.
+		exemptions = append(exemptions, who)
+	}
 	for _, wallet := range e.pool.Makers {
 		exemptions = append(exemptions, wallet.Addr)
 	}
 	if len(exemptions) > 32 {
-		return fmt.Errorf("v2 supports at most 32 additional snipe-tax-exempt maker wallets; got %d", len(exemptions))
+		return fmt.Errorf("v2 supports at most 32 additional snipe-tax-exempt wallets; got %d", len(exemptions))
 	}
 	// A non-zero initial buy routes the launch through the official
 	// launch-and-buy router: the treasury's first buy executes inside the
@@ -371,15 +383,23 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	if devBuy.Sign() > 0 {
 		gasLimit += buyGasLimit
 	}
+	var bundle *launchBundle
+	if bundleMode != BundleOff {
+		bundle, err = e.prepareLaunchBundle(ctx, params, pairToken)
+		if err != nil {
+			return fmt.Errorf("prepare launch bundle: %w", err)
+		}
+		gasLimit = bundle.launchGas(gasLimit)
+	}
 	if err := e.ensureLaunchFunds(ctx, value, gasLimit); err != nil {
 		return err
 	}
 	e.log.Info("v2 launch preflight ok",
-		"deployer", who.Hex(), "launch_fee_eth", weiToEthStr(fee),
+		"deployer", deployer.Hex(), "bundle_mode", bundleMode, "launch_fee_eth", weiToEthStr(fee),
 		"atomic_initial_buy_eth", weiToEthStr(devBuy),
 		"supply", launchCfg.Supply.String(),
 		"graduation_threshold_eth", weiToEthStr(launchCfg.GraduationThreshold),
-		"maker_exemptions", len(exemptions))
+		"snipe_exemptions", len(exemptions))
 	if dryRun {
 		e.log.Info("dry-run: not sending v2 launch transaction")
 		return nil
@@ -388,65 +408,80 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		return err
 	}
 	e.captureStartBalance()
-	// A bundle pre-signs every maker buy against the CREATE2-predicted curve
-	// so the buys leave in the same batch as the launch instead of one
-	// receipt-wait later. Prepared before gas is quoted so the head tracker
-	// and prediction reads do not age the gas params.
-	var bundle *launchBundle
-	if e.cfg.BundleBuys {
-		bundle, err = e.prepareLaunchBundle(ctx, params, pairToken, who)
-		if err != nil {
-			return fmt.Errorf("prepare launch bundle: %w", err)
+	if bundle != nil && bundle.mode == BundleAtomic {
+		// Makers park their spend in the router first; the launch then
+		// spends it. This round trip happens before the launch, where time
+		// does not matter.
+		if err := e.ensureDeposits(ctx, bundle); err != nil {
+			return fmt.Errorf("park maker deposits: %w", err)
 		}
-		defer bundle.close()
+		gasLimit = bundle.launchGas(uint64(launchV2GasLimit) + buyGasLimit)
 	}
 	pr, err := e.pool.txParams(ctx, e.pool.Treasury, gasLimit, e.extraTipWei)
 	if err != nil {
 		return err
 	}
 	var tx *types.Transaction
-	if devBuy.Sign() > 0 {
+	switch {
+	case bundle != nil:
+		terms := pons.RouterLaunchTerms{
+			Params: params, LaunchConfigId: new(big.Int).SetUint64(e.cfg.LaunchConfigID), PairToken: pairToken,
+			QuoteIn: devBuy, Recipient: who, SnipeTaxExemptions: exemptions,
+		}
+		if bundle.mode == BundleAtomic {
+			tx, err = e.pool.Treasury.Signer.BuildRouterLaunchAtomic(bundle.router, terms, bundle.atomicBuys(), value, pr)
+		} else {
+			tx, err = e.pool.Treasury.Signer.BuildRouterLaunch(bundle.router, terms, value, pr)
+		}
+	case devBuy.Sign() > 0:
 		tx, err = e.pool.Treasury.Signer.BuildV2LaunchAndBuy(params, e.cfg.LaunchConfigID, pairToken,
 			devBuy, big.NewInt(0), who, exemptions, value, pr)
-	} else {
+	default:
 		tx, err = e.pool.Treasury.Signer.BuildV2Launch(params, e.cfg.LaunchConfigID, pairToken, exemptions, fee, pr)
 	}
 	if err != nil {
 		return fmt.Errorf("build v2 launch: %w", err)
 	}
-	if bundle != nil {
-		if err := bundle.send(ctx, e, tx, pr); err != nil {
+	if bundle != nil && bundle.mode == BundleWindow {
+		if err := bundle.sendWindow(ctx, e, tx, pr); err != nil {
 			return fmt.Errorf("send v2 launch bundle: %w", err)
 		}
 	} else if err := e.pool.send(ctx, e.pool.Treasury, tx); err != nil {
 		return fmt.Errorf("send v2 launch: %w", err)
 	}
-	e.log.Info("v2 launch submitted", "tx", tx.Hash().Hex())
+	e.log.Info("v2 launch submitted", "tx", tx.Hash().Hex(), "bundle_mode", bundleMode)
 	rcpt, err := e.client.WaitReceiptEvery(ctx, tx.Hash(), 120*time.Second, 100*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("v2 launch confirm: %w", err)
+	}
+	if rcpt.Status != types.ReceiptStatusSuccessful {
+		e.recordGas(rcpt)
+		if bundle != nil && bundle.mode == BundleAtomic {
+			// The makers' ETH is still parked in the router; bring it home.
+			go e.withdrawDeposits(ctx, bundle)
+		}
+		return fmt.Errorf("v2 launch %s reverted on-chain (block %d)", tx.Hash().Hex(), rcpt.BlockNumber.Uint64())
 	}
 	launched, ok := pons.V2LaunchedFromReceipt(rcpt)
 	if !ok {
 		return fmt.Errorf("v2 launch receipt %s carried no TokenLaunched event", tx.Hash().Hex())
 	}
 	var burst []launchBurstBuy
-	if bundle != nil {
-		// The launch left in the same batch as the buys, so its distance from
-		// the head we saw at send time is our end-to-end latency in blocks:
-		// the window must be at least this wide for any bundled buy to fill.
-		e.log.Info("launch landed", "block", launched.Block, "head_at_send", bundle.sentAt,
-			"blocks_after_send", int64(launched.Block)-int64(bundle.sentAt),
-			"window_blocks", e.cfg.BundleMaxBlocksOrDefault(), "max_l2_block", bundle.maxBlock)
+	switch {
+	case bundle != nil && bundle.mode == BundleWindow:
+		e.log.Info("launch landed", "block", launched.Block,
+			"window_blocks", bundle.window, "max_l2_block", launched.Block+bundle.window)
 		if launched.Curve != bundle.curve {
 			// The buys were signed against the prediction; a mismatch means
-			// they will revert against an empty address. Keep running on the
-			// real curve, the makers simply join via normal accumulation.
+			// they revert (NotLaunchedHere). Keep running on the real curve,
+			// the makers simply join via normal accumulation.
 			e.log.Error("predicted curve does not match the launched curve; bundled buys will not fill",
 				"predicted", bundle.curve.Hex(), "actual", launched.Curve.Hex())
 		}
 		burst = bundle.burst()
-	} else {
+	case bundle != nil && bundle.mode == BundleAtomic:
+		e.log.Info("launch landed with atomic maker buys", "block", launched.Block, "makers", len(bundle.buys))
+	default:
 		// Broadcast the first maker buys before anything else touches the RPC:
 		// every millisecond here is a block on this chain, and launch snipers are
 		// already racing us.
@@ -469,6 +504,16 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 				"eth_in", weiToEthStr(devBuy), "tokens", tokensOut.String())
 		} else {
 			e.log.Warn("launch receipt carried no CurveBuy for the treasury; atomic initial buy unaccounted")
+		}
+	}
+	if bundle != nil && bundle.mode == BundleAtomic {
+		e.settleAtomicBuys(ctx, bundle, rcpt)
+		for _, buy := range bundle.buys {
+			go func(w *Wallet) {
+				if err := e.ensureApprove(ctx, w, big.NewInt(1), false); err != nil {
+					e.log.Warn("sell approval prewarm after atomic buy failed", "wallet", w.Addr.Hex(), "err", err)
+				}
+			}(buy.wallet)
 		}
 	}
 	for _, b := range burst {

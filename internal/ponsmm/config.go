@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -57,14 +58,20 @@ type Config struct {
 	// cannot be front-run by launch snipers.
 	DevBuyETH float64 `yaml:"dev_buy_eth"`
 
-	// BundleBuys (v2 only) pre-signs one buy per funded maker against the
-	// CREATE2-predicted curve and broadcasts them in the same JSON-RPC batch
-	// as the launch, through our block-height-limited router. Those buys have
-	// NO slippage bound; they either land within BundleMaxBlocks L2 blocks of
-	// submission or revert (Expired) and the wallet keeps its ETH for the
-	// normal accumulation path.
-	BundleBuys      bool   `yaml:"bundle_buys"`
-	BundleMaxBlocks int    `yaml:"bundle_max_blocks"` // window in L2 blocks (~100ms each), default 3
+	// BundleMode (v2 only) routes the launch through our PonsMMRouter so the
+	// chain itself, not this client, decides which maker buys count as "at
+	// launch". The official contracts then record the router as the token's
+	// deployer; the creator fee recipient and every token stay on our wallets.
+	//   ""/"none":  launch directly from the treasury, makers buy after the receipt.
+	//   "window":   the router records the launch's L2 block; maker buys are
+	//               pre-signed against the CREATE2-predicted curve, broadcast in
+	//               the same JSON-RPC batch, and revert on-chain unless they land
+	//               within BundleMaxBlocks blocks of the launch. No slippage.
+	//   "atomic":   makers first park their spend in the router; the launch and
+	//               every maker buy then execute in ONE transaction. Nothing can
+	//               trade between the launch and our fills.
+	BundleMode      string `yaml:"bundle_mode"`
+	BundleMaxBlocks int    `yaml:"bundle_max_blocks"` // window mode: blocks after launch, default 3
 	MMRouter        string `yaml:"mm_router"`         // PonsMMRouter proxy; empty uses the built-in default
 
 	// Accumulation.
@@ -200,26 +207,54 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 	default:
 		return fmt.Errorf("retail_response must be %q or %q", RetailResponseDistribute, RetailResponseTarget)
 	}
-	if c.BundleBuys {
+	switch mode := c.BundleModeName(); mode {
+	case BundleOff:
+	case BundleWindow, BundleAtomic:
 		if protocol != ProtocolV2 {
 			return fmt.Errorf("bundled launch buys require the v2 bonding curve")
 		}
 		if c.MMRouter != "" && !common.IsHexAddress(c.MMRouter) {
 			return fmt.Errorf("mm_router is not a valid address: %q", c.MMRouter)
 		}
-		if n := c.BundleMaxBlocksOrDefault(); n < 1 || n > MaxBundleMaxBlocks {
-			return fmt.Errorf("bundle_max_blocks must be in [1, %d]", MaxBundleMaxBlocks)
+		if mode == BundleWindow {
+			if n := c.BundleMaxBlocksOrDefault(); n < 1 || n > MaxBundleMaxBlocks {
+				return fmt.Errorf("bundle_max_blocks must be in [1, %d]", MaxBundleMaxBlocks)
+			}
 		}
+	default:
+		return fmt.Errorf("bundle_mode must be %q, %q or %q", BundleOff, BundleWindow, BundleAtomic)
 	}
 	return nil
 }
 
+// Bundle modes; see Config.BundleMode.
+const (
+	BundleOff    = "none"
+	BundleWindow = "window"
+	BundleAtomic = "atomic"
+)
+
 // Bundle window bounds. One L2 block is ~100ms on Robinhood Chain; a window
-// longer than 50 blocks (~5s) no longer protects against anything.
+// longer than 50 blocks (~5s) after the launch no longer protects anything.
 const (
 	DefaultBundleMaxBlocks = 3
 	MaxBundleMaxBlocks     = 50
 )
+
+// BundleModeName normalises BundleMode, treating empty as off.
+func (c *Config) BundleModeName() string {
+	switch m := strings.ToLower(strings.TrimSpace(c.BundleMode)); m {
+	case "", BundleOff, "off", "false":
+		return BundleOff
+	default:
+		return m
+	}
+}
+
+// Bundling reports whether the launch goes through our router at all.
+func (c *Config) Bundling() bool {
+	return c.BundleModeName() != BundleOff
+}
 
 // BundleMaxBlocksOrDefault returns the bundle window, defaulting to 3 blocks.
 func (c *Config) BundleMaxBlocksOrDefault() int {
