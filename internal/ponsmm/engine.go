@@ -286,6 +286,31 @@ func (e *Engine) launchV1(ctx context.Context, dryRun bool) error {
 	return nil
 }
 
+// launchGasLimit sizes the launch transaction from a live eth_estimateGas of
+// its exact calldata (so the exemption count, the opening buy and the router
+// hop are all priced), plus 15% headroom. The static worst case is only the
+// fallback for a node that cannot simulate the call; the limit is also what
+// the node makes the treasury pre-fund (gas x fee cap), so a tight figure
+// matters even though unused gas is refunded.
+func (e *Engine) launchGasLimit(ctx context.Context, from common.Address, probe *types.Transaction, fallback uint64) uint64 {
+	if probe.To() == nil {
+		return fallback
+	}
+	est, err := e.client.EstimateGas(ctx, from, *probe.To(), probe.Value(), probe.Data())
+	if err != nil {
+		e.log.Warn("launch gas estimate failed; using the static worst case", "fallback", fallback, "err", err)
+		return fallback
+	}
+	limit := est + est*15/100
+	if limit > fallback {
+		// The estimate exceeds what we budgeted for; trust the node.
+		e.log.Warn("launch gas estimate above the static budget", "estimate", est, "budget", fallback)
+		return limit
+	}
+	e.log.Info("launch gas estimated", "estimate", est, "gas_limit", limit, "static_budget", fallback)
+	return limit
+}
+
 // ensureLaunchFunds verifies before a launch that the treasury can cover the
 // transaction value plus the node's worst-case gas reservation (gas limit x
 // suggested fee cap), so underfunding fails preflight with a clear message
@@ -371,13 +396,20 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	for _, wallet := range e.pool.Makers {
 		exemptions = append(exemptions, wallet.Addr)
 	}
-	if len(exemptions) > 32 {
-		return fmt.Errorf("v2 supports at most 32 additional snipe-tax-exempt wallets; got %d", len(exemptions))
-	}
 	// A non-zero initial buy routes the launch through the official
 	// launch-and-buy router: the treasury's first buy executes inside the
 	// launch transaction itself, so no sniper can trade before it.
 	devBuy := ethToWei(e.cfg.DevBuyETH)
+	// The factory accepts 32 exemptions; the official launch-and-buy router
+	// appends the buy recipient itself, leaving 31 for us (verified with
+	// eth_estimateGas: 32 reverts, 31 passes).
+	maxExemptions := 32
+	if devBuy.Sign() > 0 {
+		maxExemptions = 31
+	}
+	if len(exemptions) > maxExemptions {
+		return fmt.Errorf("this launch supports at most %d snipe-tax-exempt wallets; got %d (drop maker wallets or the initial buy)", maxExemptions, len(exemptions))
+	}
 	value := new(big.Int).Add(fee, devBuy)
 	gasLimit := uint64(launchV2GasLimit)
 	if devBuy.Sign() > 0 {
@@ -391,12 +423,43 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		}
 		gasLimit = bundle.launchGas(gasLimit)
 	}
+	// buildLaunchTx signs the launch for the given params; it is called once
+	// with placeholder params to obtain calldata for gas estimation and once
+	// more with the real nonce and gas quote.
+	buildLaunchTx := func(pr pons.TxParams) (*types.Transaction, error) {
+		switch {
+		case bundle != nil:
+			terms := pons.RouterLaunchTerms{
+				Params: params, LaunchConfigId: new(big.Int).SetUint64(e.cfg.LaunchConfigID), PairToken: pairToken,
+				QuoteIn: devBuy, Recipient: who, SnipeTaxExemptions: exemptions,
+			}
+			if bundle.mode == BundleAtomic {
+				return e.pool.Treasury.Signer.BuildRouterLaunchAtomic(bundle.router, terms, bundle.atomicBuys(), value, pr)
+			}
+			return e.pool.Treasury.Signer.BuildRouterLaunch(bundle.router, terms, value, pr)
+		case devBuy.Sign() > 0:
+			return e.pool.Treasury.Signer.BuildV2LaunchAndBuy(params, e.cfg.LaunchConfigID, pairToken,
+				devBuy, big.NewInt(0), who, exemptions, value, pr)
+		default:
+			return e.pool.Treasury.Signer.BuildV2Launch(params, e.cfg.LaunchConfigID, pairToken, exemptions, fee, pr)
+		}
+	}
+	probe, err := buildLaunchTx(pons.TxParams{GasLimit: gasLimit, TipCap: big.NewInt(0), FeeCap: big.NewInt(0)})
+	if err != nil {
+		return fmt.Errorf("build v2 launch: %w", err)
+	}
+	// Atomic launches cannot be simulated until the maker deposits exist;
+	// the funds check uses the static worst case and the real estimate is
+	// taken after the deposits land.
+	if bundle == nil || bundle.mode != BundleAtomic {
+		gasLimit = e.launchGasLimit(ctx, who, probe, gasLimit)
+	}
 	if err := e.ensureLaunchFunds(ctx, value, gasLimit); err != nil {
 		return err
 	}
 	e.log.Info("v2 launch preflight ok",
 		"deployer", deployer.Hex(), "bundle_mode", bundleMode, "launch_fee_eth", weiToEthStr(fee),
-		"atomic_initial_buy_eth", weiToEthStr(devBuy),
+		"atomic_initial_buy_eth", weiToEthStr(devBuy), "gas_limit", gasLimit,
 		"supply", launchCfg.Supply.String(),
 		"graduation_threshold_eth", weiToEthStr(launchCfg.GraduationThreshold),
 		"snipe_exemptions", len(exemptions))
@@ -415,30 +478,18 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		if err := e.ensureDeposits(ctx, bundle); err != nil {
 			return fmt.Errorf("park maker deposits: %w", err)
 		}
-		gasLimit = bundle.launchGas(uint64(launchV2GasLimit) + buyGasLimit)
+		fallback := bundle.launchGas(uint64(launchV2GasLimit) + buyGasLimit)
+		probe, err = buildLaunchTx(pons.TxParams{GasLimit: fallback, TipCap: big.NewInt(0), FeeCap: big.NewInt(0)})
+		if err != nil {
+			return fmt.Errorf("build v2 launch: %w", err)
+		}
+		gasLimit = e.launchGasLimit(ctx, who, probe, fallback)
 	}
 	pr, err := e.pool.txParams(ctx, e.pool.Treasury, gasLimit, e.extraTipWei)
 	if err != nil {
 		return err
 	}
-	var tx *types.Transaction
-	switch {
-	case bundle != nil:
-		terms := pons.RouterLaunchTerms{
-			Params: params, LaunchConfigId: new(big.Int).SetUint64(e.cfg.LaunchConfigID), PairToken: pairToken,
-			QuoteIn: devBuy, Recipient: who, SnipeTaxExemptions: exemptions,
-		}
-		if bundle.mode == BundleAtomic {
-			tx, err = e.pool.Treasury.Signer.BuildRouterLaunchAtomic(bundle.router, terms, bundle.atomicBuys(), value, pr)
-		} else {
-			tx, err = e.pool.Treasury.Signer.BuildRouterLaunch(bundle.router, terms, value, pr)
-		}
-	case devBuy.Sign() > 0:
-		tx, err = e.pool.Treasury.Signer.BuildV2LaunchAndBuy(params, e.cfg.LaunchConfigID, pairToken,
-			devBuy, big.NewInt(0), who, exemptions, value, pr)
-	default:
-		tx, err = e.pool.Treasury.Signer.BuildV2Launch(params, e.cfg.LaunchConfigID, pairToken, exemptions, fee, pr)
-	}
+	tx, err := buildLaunchTx(pr)
 	if err != nil {
 		return fmt.Errorf("build v2 launch: %w", err)
 	}

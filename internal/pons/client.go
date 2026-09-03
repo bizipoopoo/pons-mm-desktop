@@ -128,6 +128,12 @@ func (c *Client) callView(ctx context.Context, to common.Address, a *abi.ABI, ou
 	return nil
 }
 
+// EstimateGas runs eth_estimateGas for a call from `from` with the given
+// value and calldata against the latest state.
+func (c *Client) EstimateGas(ctx context.Context, from, to common.Address, value *big.Int, data []byte) (uint64, error) {
+	return c.eth.EstimateGas(ctx, ethereum.CallMsg{From: from, To: &to, Value: value, Data: data})
+}
+
 // LoadLaunchInfo fills in the immutable curve/token facts (fees, quote asset,
 // metadata) for a detected launch.
 func (c *Client) LoadLaunchInfo(ctx context.Context, li *LaunchInfo) error {
