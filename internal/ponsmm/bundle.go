@@ -64,7 +64,14 @@ func (e *Engine) prepareLaunchBundle(ctx context.Context, params pons.V2TokenPar
 		return nil, fmt.Errorf("predict launch addresses: %w", err)
 	}
 
-	eligible := e.fundedMakers()
+	// Window mode keeps every maker here; spend is sized later in
+	// sendWindow.refreshWindowBuys from fresh balances + the launch feeCap.
+	// Filtering with fundedMakers() before RefreshETH used to drop everyone
+	// (maker_buys=0) after a prior round left the cache looking empty.
+	eligible := e.pool.Makers
+	if bmode := e.cfg.BundleModeName(); bmode == BundleAtomic {
+		eligible = e.fundedMakers()
+	}
 	if !e.cfg.ConcurrentBuys && len(eligible) > 1 {
 		eligible = eligible[:1]
 	}
@@ -74,7 +81,7 @@ func (e *Engine) prepareLaunchBundle(ctx context.Context, params pons.V2TokenPar
 		b.buys = append(b.buys, bundleBuy{wallet: w})
 	}
 	if b.mode == BundleAtomic {
-		// Deposits are sized here; ensureDeposits runs after RefreshETH.
+		// Deposits are sized here; caller must RefreshETH first.
 		gasReserve := ethToWei(e.cfg.GasReserveETH)
 		_, feeCap, _ := e.client.SuggestGas(ctx, e.extraTipWei)
 		kept := make([]bundleBuy, 0, len(b.buys))
@@ -276,6 +283,10 @@ func (b *launchBundle) refreshWindowBuys(e *Engine, feeCap *big.Int) {
 // node rejects outright is dropped from the bundle.
 func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *types.Transaction, launchPr pons.TxParams) error {
 	b.refreshWindowBuys(e, launchPr.FeeCap)
+	if len(b.buys) == 0 {
+		return fmt.Errorf("no maker wallet can afford buyAfterLaunch at the launch fee cap (each needs value + %d gas × feeCap under balance after the %.4f ETH gas reserve); top up makers or lower GasReserveETH",
+			bundleGasLimit, e.cfg.GasReserveETH)
+	}
 
 	locked := b.buys // b.buys is filtered below; unlock exactly what was locked
 	for _, buy := range locked {
@@ -302,6 +313,9 @@ func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *type
 		txs = append(txs, tx)
 	}
 	b.buys = kept
+	if len(b.buys) == 0 {
+		return fmt.Errorf("every bundled maker buy failed to build; refusing to send the launch alone")
+	}
 
 	errs := e.client.SendRawBatch(ctx, txs)
 	if errs[0] != nil {

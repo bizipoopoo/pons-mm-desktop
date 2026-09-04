@@ -417,9 +417,20 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	}
 	var bundle *launchBundle
 	if bundleMode != BundleOff {
+		// Maker balances must be fresh before the bundle is sized. prepare used
+		// to run on a stale cache (often empty right after a prior round), so
+		// the JSON-RPC batch left with buys=0 and makers only bought later via
+		// the post-receipt burst — several blocks after the launch.
+		if err := e.pool.RefreshETH(ctx); err != nil {
+			return err
+		}
 		bundle, err = e.prepareLaunchBundle(ctx, params, pairToken)
 		if err != nil {
 			return fmt.Errorf("prepare launch bundle: %w", err)
+		}
+		if len(bundle.buys) == 0 {
+			return fmt.Errorf("bundle mode %s selected but no maker wallet has spendable ETH after gas reserve (%.4f ETH); top up makers or lower GasReserveETH",
+				bundleMode, e.cfg.GasReserveETH)
 		}
 		gasLimit = bundle.launchGas(gasLimit)
 	}
