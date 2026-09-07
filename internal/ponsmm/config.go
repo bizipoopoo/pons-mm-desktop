@@ -64,14 +64,16 @@ type Config struct {
 	// deployer; the creator fee recipient and every token stay on our wallets.
 	//   ""/"none":  launch directly from the treasury, makers buy after the receipt.
 	//   "window":   the router records the launch's L2 block; maker buys are
-	//               pre-signed against the CREATE2-predicted curve, broadcast in
-	//               the same JSON-RPC batch, and revert on-chain unless they land
-	//               within BundleMaxBlocks blocks of the launch. No slippage.
+	//               pre-signed against the CREATE2-predicted curve. The launch
+	//               is sent first, then each buy is resubmitted concurrently
+	//               until its receipt (fill or revert). A buy that lands more
+	//               than BundleMaxBlocks after the launch reverts. No slippage.
 	//   "atomic":   makers first park their spend in the router; the launch and
 	//               every maker buy then execute in ONE transaction. Nothing can
 	//               trade between the launch and our fills.
 	BundleMode      string `yaml:"bundle_mode"`
 	BundleMaxBlocks int    `yaml:"bundle_max_blocks"` // window mode: blocks after launch, default 3
+	BundleBuyCount  int    `yaml:"bundle_buy_count"`  // window mode: maker buys to pre-sign, default 10
 	MMRouter        string `yaml:"mm_router"`         // PonsMMRouter proxy; empty uses the built-in default
 
 	// Accumulation.
@@ -220,6 +222,9 @@ func (c *Config) Validate(requireLaunchMetadata bool) error {
 			if n := c.BundleMaxBlocksOrDefault(); n < 1 || n > MaxBundleMaxBlocks {
 				return fmt.Errorf("bundle_max_blocks must be in [1, %d]", MaxBundleMaxBlocks)
 			}
+			if n := c.BundleBuyCountOrDefault(); n < 1 || n > MaxBundleBuyCount {
+				return fmt.Errorf("bundle_buy_count must be in [1, %d]", MaxBundleBuyCount)
+			}
 		}
 	default:
 		return fmt.Errorf("bundle_mode must be %q, %q or %q", BundleOff, BundleWindow, BundleAtomic)
@@ -239,6 +244,8 @@ const (
 const (
 	DefaultBundleMaxBlocks = 3
 	MaxBundleMaxBlocks     = 50
+	DefaultBundleBuyCount  = 10
+	MaxBundleBuyCount      = 31
 )
 
 // BundleModeName normalises BundleMode, treating empty as off.
@@ -262,6 +269,15 @@ func (c *Config) BundleMaxBlocksOrDefault() int {
 		return DefaultBundleMaxBlocks
 	}
 	return c.BundleMaxBlocks
+}
+
+// BundleBuyCountOrDefault is how many maker buys window mode pre-signs and
+// then concurrently resubmits. Zero/negative means the default of 10.
+func (c *Config) BundleBuyCountOrDefault() int {
+	if c.BundleBuyCount <= 0 {
+		return DefaultBundleBuyCount
+	}
+	return c.BundleBuyCount
 }
 
 // MMRouterAddr returns the block-limited router to route bundled buys through:

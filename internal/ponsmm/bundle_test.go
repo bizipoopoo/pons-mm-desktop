@@ -26,6 +26,9 @@ func TestBundleConfigValidation(t *testing.T) {
 	if c.BundleMaxBlocksOrDefault() != DefaultBundleMaxBlocks {
 		t.Fatalf("default window = %d", c.BundleMaxBlocksOrDefault())
 	}
+	if c.BundleBuyCountOrDefault() != DefaultBundleBuyCount {
+		t.Fatalf("default buy count = %d", c.BundleBuyCountOrDefault())
+	}
 	if c.MMRouterAddr() != common.HexToAddress(pons.MMRouter) {
 		t.Fatalf("empty mm_router should resolve to the built-in deployment")
 	}
@@ -52,6 +55,12 @@ func TestBundleConfigValidation(t *testing.T) {
 	c.BundleMaxBlocks = MaxBundleMaxBlocks + 1
 	if err := c.Validate(true); err == nil || !strings.Contains(err.Error(), "bundle_max_blocks") {
 		t.Fatalf("oversized window should be rejected, got %v", err)
+	}
+
+	c = bundleConfig()
+	c.BundleBuyCount = MaxBundleBuyCount + 1
+	if err := c.Validate(true); err == nil || !strings.Contains(err.Error(), "bundle_buy_count") {
+		t.Fatalf("oversized buy count should be rejected, got %v", err)
 	}
 
 	// Atomic mode has no window: an out-of-range value is irrelevant.

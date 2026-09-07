@@ -333,6 +333,7 @@ export namespace control {
 	    devBuyEth: number;
 	    bundleMode: string;
 	    bundleMaxBlocks: number;
+	    bundleBuyCount: number;
 	    buyFraction: number;
 	    accumulateIntervalMs: number;
 	    concurrentBuys: boolean;
@@ -368,6 +369,7 @@ export namespace control {
 	        this.devBuyEth = source["devBuyEth"];
 	        this.bundleMode = source["bundleMode"];
 	        this.bundleMaxBlocks = source["bundleMaxBlocks"];
+	        this.bundleBuyCount = source["bundleBuyCount"];
 	        this.buyFraction = source["buyFraction"];
 	        this.accumulateIntervalMs = source["accumulateIntervalMs"];
 	        this.concurrentBuys = source["concurrentBuys"];

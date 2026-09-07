@@ -514,10 +514,12 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 	e.log.Info("v2 launch submitted", "tx", tx.Hash().Hex(), "bundle_mode", bundleMode)
 	rcpt, err := e.client.WaitReceiptEvery(ctx, tx.Hash(), 120*time.Second, 100*time.Millisecond)
 	if err != nil {
+		bundle.stopSpam()
 		return fmt.Errorf("v2 launch confirm: %w", err)
 	}
 	if rcpt.Status != types.ReceiptStatusSuccessful {
 		e.recordGas(rcpt)
+		bundle.stopSpam()
 		if bundle != nil && bundle.mode == BundleAtomic {
 			// The makers' ETH is still parked in the router; bring it home.
 			go e.withdrawDeposits(ctx, bundle)
@@ -541,12 +543,6 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 				"predicted", bundle.curve.Hex(), "actual", launched.Curve.Hex())
 		}
 		burst = bundle.burst()
-		if len(burst) == 0 {
-			// Every bundled buy was dropped or rejected; do not wait for the
-			// accumulation loop — snipers are already in the next blocks.
-			e.log.Warn("no bundled maker buy was accepted; falling back to an immediate curve burst")
-			burst = e.launchBuyBurst(ctx, launched.Curve, pr)
-		}
 	case bundle != nil && bundle.mode == BundleAtomic:
 		e.log.Info("launch landed with atomic maker buys", "block", launched.Block, "makers", len(bundle.buys))
 	default:

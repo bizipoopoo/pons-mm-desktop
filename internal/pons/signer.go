@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -118,4 +119,30 @@ func (s *Signer) BuildTransfer(to common.Address, value *big.Int, p TxParams) (*
 // Send broadcasts a signed tx.
 func (c *Client) Send(ctx context.Context, tx *types.Transaction) error {
 	return c.eth.SendTransaction(ctx, tx)
+}
+
+// IsAlreadyKnown reports a send error that means the same signed tx is already
+// with the node (or its nonce has already been consumed). Safe to ignore when
+// resubmitting one pre-signed payload until a receipt arrives.
+func IsAlreadyKnown(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already known") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "known transaction") ||
+		strings.Contains(msg, "nonce too low")
+}
+
+// Receipt returns the mined receipt, or (nil, nil) if it is not on chain yet.
+func (c *Client) Receipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	rcpt, err := c.eth.TransactionReceipt(ctx, hash)
+	if err != nil {
+		if err == ethereum.NotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rcpt, nil
 }

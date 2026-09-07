@@ -60,6 +60,7 @@ type Strategy struct {
 	// BundleMode: "none", "window" or "atomic" (see ponsmm.Config.BundleMode).
 	BundleMode           string  `json:"bundleMode"`
 	BundleMaxBlocks      int     `json:"bundleMaxBlocks"`
+	BundleBuyCount       int     `json:"bundleBuyCount"`
 	BuyFraction          float64 `json:"buyFraction"`
 	AccumulateIntervalMS int64   `json:"accumulateIntervalMs"`
 	ConcurrentBuys       bool    `json:"concurrentBuys"`
@@ -84,6 +85,7 @@ func NewStrategy() Strategy {
 		Enabled:              true,
 		BundleMode:           ponsmm.BundleOff,
 		BundleMaxBlocks:      ponsmm.DefaultBundleMaxBlocks,
+		BundleBuyCount:       ponsmm.DefaultBundleBuyCount,
 		BuyFraction:          0.99,
 		AccumulateIntervalMS: 100,
 		ConcurrentBuys:       true,
@@ -119,6 +121,7 @@ func (s Strategy) engineConfig(settings Settings) *ponsmm.Config {
 		DevBuyETH:          s.DevBuyETH,
 		BundleMode:         s.BundleMode,
 		BundleMaxBlocks:    s.BundleMaxBlocks,
+		BundleBuyCount:     s.BundleBuyCount,
 		MMRouter:           strings.TrimSpace(settings.MMRouter),
 		BuyFraction:        s.BuyFraction,
 		AccumulateInterval: time.Duration(s.AccumulateIntervalMS) * time.Millisecond,

@@ -29,17 +29,19 @@ const (
 )
 
 // launchBundle is a launch routed through PonsMMRouter together with the
-// maker buys that belong to it. In window mode the buys are separate
-// transactions broadcast in the launch's JSON-RPC batch and the router
-// rejects any that land more than `window` L2 blocks after the launch. In
-// atomic mode the buys execute inside the launch transaction itself.
+// maker buys that belong to it. In window mode the buys are pre-signed,
+// the launch is sent first, and each buy is then resubmitted concurrently
+// until it gets a receipt (fill or revert). The router rejects any buy
+// that lands more than `window` L2 blocks after the launch. In atomic
+// mode the buys execute inside the launch transaction itself.
 type launchBundle struct {
-	mode   string
-	router common.Address
-	curve  common.Address // CREATE2-predicted, deployer = router
-	token  common.Address // predicted
-	window uint64         // window mode: max blocks after launch
-	buys   []bundleBuy
+	mode       string
+	router     common.Address
+	curve      common.Address // CREATE2-predicted, deployer = router
+	token      common.Address // predicted
+	window     uint64         // window mode: max blocks after launch
+	buys       []bundleBuy
+	spamCancel context.CancelFunc
 }
 
 type bundleBuy struct {
@@ -64,16 +66,18 @@ func (e *Engine) prepareLaunchBundle(ctx context.Context, params pons.V2TokenPar
 		return nil, fmt.Errorf("predict launch addresses: %w", err)
 	}
 
-	// Window mode keeps every maker here; spend is sized later in
+	// Window mode keeps makers here; spend is sized later in
 	// sendWindow.refreshWindowBuys from fresh balances + the launch feeCap.
 	// Filtering with fundedMakers() before RefreshETH used to drop everyone
 	// (maker_buys=0) after a prior round left the cache looking empty.
 	eligible := e.pool.Makers
 	if bmode := e.cfg.BundleModeName(); bmode == BundleAtomic {
 		eligible = e.fundedMakers()
-	}
-	if !e.cfg.ConcurrentBuys && len(eligible) > 1 {
-		eligible = eligible[:1]
+		if !e.cfg.ConcurrentBuys && len(eligible) > 1 {
+			eligible = eligible[:1]
+		}
+	} else if n := e.cfg.BundleBuyCountOrDefault(); len(eligible) > n {
+		eligible = eligible[:n]
 	}
 	b := &launchBundle{mode: e.cfg.BundleModeName(), router: router, curve: curve, token: token,
 		window: uint64(e.cfg.BundleMaxBlocksOrDefault())}
@@ -277,18 +281,22 @@ func (b *launchBundle) refreshWindowBuys(e *Engine, feeCap *big.Int) {
 	b.buys = kept
 }
 
-// sendWindow (window mode) signs one buyAfterLaunch per maker against the
-// predicted curve and broadcasts the launch and every buy in one JSON-RPC
-// batch. The launch is element 0 so the sequencer sees it first; a buy the
-// node rejects outright is dropped from the bundle.
+// sendWindow (window mode) pre-signs one buyAfterLaunch per maker, sends the
+// launch first, then starts one goroutine per buy that keeps resubmitting
+// that same signed tx until a receipt arrives (success or revert) or the
+// spam context is cancelled. Buys start without waiting for the launch
+// receipt so they can race into the next blocks.
 func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *types.Transaction, launchPr pons.TxParams) error {
 	b.refreshWindowBuys(e, launchPr.FeeCap)
+	if n := e.cfg.BundleBuyCountOrDefault(); len(b.buys) > n {
+		b.buys = b.buys[:n]
+	}
 	if len(b.buys) == 0 {
 		return fmt.Errorf("no maker wallet can afford buyAfterLaunch at the launch fee cap (each needs value + %d gas × feeCap under balance after the %.4f ETH gas reserve); top up makers or lower GasReserveETH",
 			bundleGasLimit, e.cfg.GasReserveETH)
 	}
 
-	locked := b.buys // b.buys is filtered below; unlock exactly what was locked
+	locked := b.buys
 	for _, buy := range locked {
 		buy.wallet.txMu.Lock()
 	}
@@ -298,8 +306,6 @@ func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *type
 		}
 	}()
 
-	txs := make([]*types.Transaction, 0, 1+len(b.buys))
-	txs = append(txs, launchTx)
 	kept := make([]bundleBuy, 0, len(b.buys))
 	for _, buy := range b.buys {
 		pr := pons.TxParams{Nonce: buy.wallet.Nonce, GasLimit: bundleGasLimit, TipCap: launchPr.TipCap, FeeCap: launchPr.FeeCap}
@@ -309,43 +315,91 @@ func (b *launchBundle) sendWindow(ctx context.Context, e *Engine, launchTx *type
 			continue
 		}
 		buy.tx = tx
+		buy.wallet.Nonce++
 		kept = append(kept, buy)
-		txs = append(txs, tx)
 	}
 	b.buys = kept
 	if len(b.buys) == 0 {
 		return fmt.Errorf("every bundled maker buy failed to build; refusing to send the launch alone")
 	}
 
-	errs := e.client.SendRawBatch(ctx, txs)
-	if errs[0] != nil {
-		// The launch itself was refused: nothing else in the bundle can fill.
-		if n, err := e.client.PendingNonce(ctx, e.pool.Treasury.Addr); err == nil {
+	if err := sendUntilAccepted(ctx, e.client, launchTx); err != nil {
+		if n, nerr := e.client.PendingNonce(ctx, e.pool.Treasury.Addr); nerr == nil {
 			e.pool.Treasury.Nonce = n
 		}
-		return fmt.Errorf("send launch: %w", errs[0])
+		return fmt.Errorf("send launch: %w", err)
 	}
 	e.pool.Treasury.Nonce++
-	accepted := make([]bundleBuy, 0, len(b.buys))
-	for i, buy := range b.buys {
-		if err := errs[i+1]; err != nil {
-			gasCost := new(big.Int).Mul(launchPr.FeeCap, new(big.Int).SetUint64(bundleGasLimit))
-			e.log.Warn("bundle buy rejected by node",
-				"wallet", buy.wallet.Addr.Hex(), "value_eth", weiToEthStr(buy.spend),
-				"balance_eth", weiToEthStr(buy.wallet.ETHWei), "gas_cost_eth", weiToEthStr(gasCost),
-				"fee_cap", launchPr.FeeCap, "err", err)
-			if n, e2 := e.client.PendingNonce(ctx, buy.wallet.Addr); e2 == nil {
-				buy.wallet.Nonce = n
-			}
-			continue
-		}
-		buy.wallet.Nonce++
-		accepted = append(accepted, buy)
+
+	spamCtx, cancel := context.WithCancel(ctx)
+	b.spamCancel = cancel
+	for _, buy := range b.buys {
+		go e.spamUntilReceipt(spamCtx, buy.tx, buy.wallet.Addr)
 	}
-	b.buys = accepted
-	e.log.Info("launch bundle broadcast", "launch_tx", launchTx.Hash().Hex(),
-		"buys", len(b.buys), "window_blocks_after_launch", b.window)
+	e.log.Info("launch sent; maker buys being resubmitted until receipt",
+		"launch_tx", launchTx.Hash().Hex(), "buys", len(b.buys),
+		"window_blocks_after_launch", b.window)
 	return nil
+}
+
+func (b *launchBundle) stopSpam() {
+	if b != nil && b.spamCancel != nil {
+		b.spamCancel()
+	}
+}
+
+// sendUntilAccepted submits tx once, treating "already known" as success, and
+// retries a handful of transient send errors so a blip does not abort launch.
+func sendUntilAccepted(ctx context.Context, client *pons.Client, tx *types.Transaction) error {
+	var last error
+	for attempt := 0; attempt < 8; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := client.Send(ctx, tx)
+		if err == nil || pons.IsAlreadyKnown(err) {
+			return nil
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return last
+}
+
+// spamUntilReceipt keeps sending one pre-signed buy until it is mined
+// (success or revert) or ctx is cancelled. Same hash / same nonce every time.
+func (e *Engine) spamUntilReceipt(ctx context.Context, tx *types.Transaction, wallet common.Address) {
+	hash := tx.Hash()
+	sends := 0
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := e.client.Send(ctx, tx); err != nil && !pons.IsAlreadyKnown(err) {
+			e.log.Debug("bundle buy resend", "wallet", wallet.Hex(), "tx", hash.Hex(), "err", err)
+		} else {
+			sends++
+		}
+		if rcpt, err := e.client.Receipt(ctx, hash); err == nil && rcpt != nil {
+			status := "reverted"
+			if rcpt.Status == types.ReceiptStatusSuccessful {
+				status = "filled"
+			}
+			e.log.Info("bundle buy reached a terminal receipt; stopping resubmits",
+				"wallet", wallet.Hex(), "tx", hash.Hex(), "status", status,
+				"block", rcpt.BlockNumber.Uint64(), "sends", sends)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
 }
 
 // burst adapts the accepted window-mode buys to the post-launch bookkeeping
