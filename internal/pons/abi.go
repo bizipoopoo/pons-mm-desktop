@@ -44,6 +44,9 @@ const (
 	// park maker ETH with deposit() and fill every maker inside
 	// launchAndBuyAtomic(). Settings may override this default.
 	MMRouter = "0x1119cDed80b82CA4d732fD1bB20c13f5e9425F60"
+	// BalanceLens is our stateless helper that returns ETH and ERC-20
+	// balances for many accounts in one eth_call.
+	BalanceLens = "0x48Fb8011E2E7a2eF3dCfe00105E3cA2869E909dc"
 
 	// RobinhoodChainID is the Robinhood Chain mainnet chain id.
 	RobinhoodChainID = 4663

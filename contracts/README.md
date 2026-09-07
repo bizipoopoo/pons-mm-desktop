@@ -59,9 +59,11 @@ Mainnet: proxy `0x1119cDed80b82CA4d732fD1bB20c13f5e9425F60`.
 ## Balance lens
 
 `PonsBalanceLens` is a stateless view helper: one `eth_call` returns native
-ETH and optional ERC-20 balances for an array of accounts. The desktop app
-injects its bytecode with `eth_call` state override, so a deployment is not
-required. If an RPC rejects state overrides, deploy it:
+ETH and optional ERC-20 balances for an array of accounts.
+
+Mainnet: `0x48Fb8011E2E7a2eF3dCfe00105E3cA2869E909dc`. The desktop app calls
+this address and falls back to injecting the same bytecode via `eth_call`
+state override if the node has no code there.
 
 ```sh
 forge script script/DeployBalanceLens.s.sol --rpc-url robinhood --broadcast

@@ -4,16 +4,15 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/rpc"
+	"golang.org/x/time/rate"
 )
 
-// PonsBalanceLens is injected at this address via eth_call state override.
-// It is not a deployed contract; see contracts/src/PonsBalanceLens.sol.
+// PonsBalanceLens runtime is injected at this dummy address only when the
+// deployed BalanceLens has no code on the connected chain.
 var balanceLensAddr = common.HexToAddress("0x0000000000000000000000000000000000Ba1a4e")
 
 // Runtime bytecode of PonsBalanceLens (solc 0.8.28, shanghai). Keep in sync
@@ -25,12 +24,15 @@ const (
 	// 500-wallet vault is four. BALANCE + balanceOf stays well under node
 	// eth_call gas caps at this size.
 	balanceLensChunk = 128
-	// QuickNode counts each JSON-RPC method in a batch against the 50/s
-	// cap, so pending-nonce refreshes are chunked and paced.
-	nonceRPCChunk = 20
+	// Nonce cannot be read from the lens contract. Individual
+	// eth_getTransactionCount calls stay well under QuickNode's 50/s cap.
+	// JSON-RPC batches are avoided: some providers (including QuickNode on
+	// HTTP) answer a batch with a single error object or a truncated array,
+	// and go-ethereum then reports "response batch did not contain a
+	// response to this call" for the unmatched IDs.
+	nonceRPCRate  = 20
+	nonceRPCBurst = 8
 )
-
-var nonceRPCGap = 300 * time.Millisecond
 
 // EthBalances returns native balances for addrs in one (or few) eth_call(s)
 // through PonsBalanceLens, instead of one eth_getBalance per wallet.
@@ -96,44 +98,24 @@ func (c *Client) SnapshotBalances(ctx context.Context, token common.Address, add
 	return native, tokens, nil
 }
 
-// PendingNonces reads pending transaction counts for addrs in JSON-RPC batches
-// small enough to stay under typical 50 method/s provider caps.
+// PendingNonces reads pending transaction counts one RPC at a time, paced
+// below typical provider request caps. Batching is intentionally not used
+// here; see nonceRPCRate.
 func (c *Client) PendingNonces(ctx context.Context, addrs []common.Address) ([]uint64, error) {
 	out := make([]uint64, len(addrs))
 	if len(addrs) == 0 {
 		return out, nil
 	}
-	for i := 0; i < len(addrs); i += nonceRPCChunk {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(nonceRPCGap):
-			}
+	lim := rate.NewLimiter(rate.Limit(nonceRPCRate), nonceRPCBurst)
+	for i, addr := range addrs {
+		if err := lim.Wait(ctx); err != nil {
+			return nil, err
 		}
-		end := i + nonceRPCChunk
-		if end > len(addrs) {
-			end = len(addrs)
+		n, err := c.PendingNonce(ctx, addr)
+		if err != nil {
+			return nil, fmt.Errorf("nonce %s: %w", addr.Hex(), err)
 		}
-		chunk := addrs[i:end]
-		elems := make([]rpc.BatchElem, len(chunk))
-		raw := make([]hexutil.Uint64, len(chunk))
-		for j, addr := range chunk {
-			elems[j] = rpc.BatchElem{
-				Method: "eth_getTransactionCount",
-				Args:   []any{addr, "pending"},
-				Result: &raw[j],
-			}
-		}
-		if err := c.rpc.BatchCallContext(ctx, elems); err != nil {
-			return nil, fmt.Errorf("nonce batch: %w", err)
-		}
-		for j, el := range elems {
-			if el.Error != nil {
-				return nil, fmt.Errorf("nonce %s: %w", chunk[j].Hex(), el.Error)
-			}
-			out[i+j] = uint64(raw[j])
-		}
+		out[i] = n
 	}
 	return out, nil
 }
@@ -201,15 +183,22 @@ func (c *Client) lensSnapshot(ctx context.Context, token common.Address, addrs [
 }
 
 func (c *Client) callLens(ctx context.Context, data []byte) ([]byte, error) {
-	to := balanceLensAddr
+	to := common.HexToAddress(BalanceLens)
 	arg := map[string]any{
 		"to":   to,
 		"data": hexutil.Bytes(data),
 	}
-	overrides := map[common.Address]ethereum.OverrideAccount{
-		to: {Code: balanceLensRuntime},
-	}
 	var hex hexutil.Bytes
+	if err := c.rpc.CallContext(ctx, &hex, "eth_call", arg, "latest"); err == nil && len(hex) > 0 {
+		return hex, nil
+	}
+	// Fallback: inject the same bytecode if the RPC has no code at BalanceLens
+	// (wrong chain, a fork, or an older node).
+	dummy := balanceLensAddr
+	arg["to"] = dummy
+	overrides := map[common.Address]ethereum.OverrideAccount{
+		dummy: {Code: balanceLensRuntime},
+	}
 	if err := c.rpc.CallContext(ctx, &hex, "eth_call", arg, "latest", overrides); err != nil {
 		return nil, fmt.Errorf("balance lens eth_call: %w", err)
 	}

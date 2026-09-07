@@ -43,7 +43,7 @@ func TestBalanceLensABIRoundTrip(t *testing.T) {
 	}
 }
 
-func TestEthBalancesOneCallWithOverride(t *testing.T) {
+func TestEthBalancesOneCall(t *testing.T) {
 	addrs := []common.Address{common.HexToAddress("0x11"), common.HexToAddress("0x22")}
 	want := []*big.Int{big.NewInt(100), big.NewInt(200)}
 	payload, err := balanceLensABI.Methods["ethBalances"].Outputs.Pack(want)
@@ -52,7 +52,6 @@ func TestEthBalancesOneCallWithOverride(t *testing.T) {
 	}
 
 	var calls atomic.Int32
-	var sawOverride atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		req, batch := decodeJSONRPC(t, body)
@@ -65,12 +64,6 @@ func TestEthBalancesOneCallWithOverride(t *testing.T) {
 			writeJSONRPC(w, req["id"], "0x1237")
 		case "eth_call":
 			calls.Add(1)
-			params, _ := req["params"].([]any)
-			if len(params) < 3 {
-				t.Errorf("eth_call missing state override (got %d params)", len(params))
-			} else if ov, ok := params[2].(map[string]any); ok {
-				sawOverride.Store(len(ov) > 0)
-			}
 			writeJSONRPC(w, req["id"], hexutil.Encode(payload))
 		default:
 			t.Errorf("unexpected method %v", req["method"])
@@ -92,54 +85,34 @@ func TestEthBalancesOneCallWithOverride(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("eth_call count = %d, want 1", calls.Load())
 	}
-	if !sawOverride.Load() {
-		t.Fatal("expected eth_call state override with PonsBalanceLens bytecode")
-	}
 	if len(got) != 2 || got[0].Cmp(want[0]) != 0 || got[1].Cmp(want[1]) != 0 {
 		t.Fatalf("balances = %v, want %v", got, want)
 	}
 }
 
-func TestPendingNoncesChunked(t *testing.T) {
-	oldGap := nonceRPCGap
-	nonceRPCGap = 0
-	defer func() { nonceRPCGap = oldGap }()
-
-	n := 25
-	addrs := make([]common.Address, n)
-	for i := range addrs {
-		addrs[i] = common.BigToAddress(big.NewInt(int64(i + 1)))
+func TestPendingNoncesAreSingleCalls(t *testing.T) {
+	addrs := []common.Address{
+		common.BigToAddress(big.NewInt(1)),
+		common.BigToAddress(big.NewInt(2)),
+		common.BigToAddress(big.NewInt(3)),
 	}
-
-	var posts atomic.Int32
-	var maxMethods atomic.Int32
+	var noncePosts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		req, batch := decodeJSONRPC(t, body)
-		if !batch {
-			if req["method"] == "eth_chainId" {
-				writeJSONRPC(w, req["id"], "0x1237")
-				return
-			}
-			t.Errorf("expected batch, got %s", body)
+		if batch {
+			t.Errorf("nonce refresh must not use JSON-RPC batches: %s", body)
 			return
 		}
-		var items []map[string]any
-		if err := json.Unmarshal(body, &items); err != nil {
-			t.Fatal(err)
+		switch req["method"] {
+		case "eth_chainId":
+			writeJSONRPC(w, req["id"], "0x1237")
+		case "eth_getTransactionCount":
+			n := noncePosts.Add(1)
+			writeJSONRPC(w, req["id"], hexutil.EncodeUint64(uint64(n)))
+		default:
+			t.Errorf("unexpected method %v", req["method"])
 		}
-		posts.Add(1)
-		if int32(len(items)) > maxMethods.Load() {
-			maxMethods.Store(int32(len(items)))
-		}
-		out := make([]map[string]any, len(items))
-		for i, it := range items {
-			if it["method"] != "eth_getTransactionCount" {
-				t.Errorf("batch[%d] method = %v", i, it["method"])
-			}
-			out[i] = map[string]any{"jsonrpc": "2.0", "id": it["id"], "result": hexutil.EncodeUint64(uint64(i + 1))}
-		}
-		json.NewEncoder(w).Encode(out)
 	}))
 	defer srv.Close()
 
@@ -154,13 +127,10 @@ func TestPendingNoncesChunked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if posts.Load() != 2 { // 20 + 5
-		t.Fatalf("batch posts = %d, want 2", posts.Load())
+	if noncePosts.Load() != 3 {
+		t.Fatalf("nonce RPCs = %d, want 3", noncePosts.Load())
 	}
-	if maxMethods.Load() > int32(nonceRPCChunk) {
-		t.Fatalf("largest batch = %d methods, cap %d", maxMethods.Load(), nonceRPCChunk)
-	}
-	if got[0] != 1 || got[20] != 1 {
+	if got[0] != 1 || got[2] != 3 {
 		t.Fatalf("nonces = %v", got)
 	}
 }
