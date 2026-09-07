@@ -98,9 +98,11 @@ type Config struct {
 	//     average buy price (v2 curves only).
 	RetailResponse string `yaml:"retail_response"`
 	// RetailTargetRatio parameterizes the "target" response:
-	//   0     do nothing;
+	//   0     hold: no buy and no sell while retail still holds;
+	//         pumping resumes only after retail net tokens are zero;
 	//   -0.1  sell whole wallets, adding one at a time, until the projected
 	//         curve price is pushed to avg*(1-0.1), then execute the batch;
+	//         pump buys stay paused until retail is flat;
 	//   +0.1  buy just enough to lift the curve price to avg*(1+0.1).
 	RetailTargetRatio float64 `yaml:"retail_target_ratio"`
 

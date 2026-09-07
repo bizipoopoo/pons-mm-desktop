@@ -14,7 +14,8 @@ import (
 // and the full exit is not yet profitable, RetailTargetRatio decides the
 // action relative to the retail buyers' volume-weighted average buy price:
 //
-//	ratio == 0  do nothing;
+//	ratio == 0  hold: no buy and no sell while retail still has a net
+//	            position; pumping resumes when they are flat;
 //	ratio  < 0  sell whole wallets, adding one at a time, until the projected
 //	            curve price is pushed to avg*(1+ratio), then execute the batch;
 //	ratio  > 0  buy exactly enough to lift the curve price to avg*(1+ratio).
@@ -145,7 +146,7 @@ func (e *Engine) startTargetResponse(ctx context.Context, snap Snapshot) {
 func (e *Engine) planTargetResponse(ctx context.Context, snap Snapshot) *targetPlan {
 	ratio := e.cfg.RetailTargetRatio
 	if ratio == 0 {
-		e.log.Info("target response: ratio 0 -> no action on unprofitable retail buy")
+		e.log.Info("target response: ratio 0 -> hold until retail exits (no buy, no sell)")
 		return nil
 	}
 	avg := snap.RetailAvgBuyPx

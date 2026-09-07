@@ -171,3 +171,60 @@ func TestClearAllWaitsForPendingBuySettlement(t *testing.T) {
 		t.Fatalf("state = %s, want done after pending buys and balances reach zero", engine.state)
 	}
 }
+
+func TestPumpPausedForRetailHold(t *testing.T) {
+	monitor := newTestMonitor(testPool(), big.NewInt(1_000_000))
+	monitor.mu.Lock()
+	monitor.retailNetTokens = big.NewInt(100)
+	monitor.mu.Unlock()
+	engine := &Engine{monitor: monitor}
+
+	engine.cfg = &Config{RetailResponse: RetailResponseTarget, RetailTargetRatio: 0}
+	if !engine.pumpPausedForRetailHold() {
+		t.Fatal("target ratio 0 must freeze buys while retail still holds")
+	}
+
+	engine.cfg.RetailTargetRatio = -0.1
+	if !engine.pumpPausedForRetailHold() {
+		t.Fatal("negative target ratio must freeze buys while retail still holds")
+	}
+
+	engine.cfg.RetailTargetRatio = 0.1
+	if engine.pumpPausedForRetailHold() {
+		t.Fatal("positive target ratio must not freeze later accumulation")
+	}
+
+	engine.cfg.RetailResponse = RetailResponseDistribute
+	engine.cfg.RetailTargetRatio = 0
+	if engine.pumpPausedForRetailHold() {
+		t.Fatal("distribute mode must not freeze on ratio 0")
+	}
+
+	engine.cfg.RetailResponse = RetailResponseTarget
+	monitor.mu.Lock()
+	monitor.retailNetTokens = big.NewInt(0)
+	monitor.mu.Unlock()
+	if engine.pumpPausedForRetailHold() {
+		t.Fatal("target ratio 0 must resume once retail is flat")
+	}
+}
+
+func TestStartAccumulationRoundFrozenAtRatioZero(t *testing.T) {
+	monitor := newTestMonitor(testPool(), big.NewInt(1_000_000))
+	monitor.mu.Lock()
+	monitor.retailNetTokens = big.NewInt(100)
+	monitor.mu.Unlock()
+	engine := &Engine{
+		cfg:     &Config{RetailResponse: RetailResponseTarget, RetailTargetRatio: 0},
+		monitor: monitor,
+		log:     slog.New(slog.DiscardHandler),
+		state:   Accumulating,
+	}
+	engine.startAccumulationRound(context.Background())
+	if engine.buyRoundRunning {
+		t.Fatal("ratio 0 must not start a buy round while remaining retail still holds")
+	}
+	if !engine.retailHoldLogged {
+		t.Fatal("expected a one-shot pause log while retail still holds")
+	}
+}

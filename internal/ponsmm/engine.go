@@ -93,6 +93,7 @@ type Engine struct {
 
 	fundWaitLogged   bool
 	lastFundsRefresh time.Time
+	retailHoldLogged bool
 	// freshLaunch marks a token this engine launched itself: balances are fully
 	// known without chain reads, so Run's startup refreshes need not block the
 	// event loop.
@@ -1021,12 +1022,21 @@ func (e *Engine) startAccumulationRound(ctx context.Context) {
 	if e.pendingBuyCount() > 0 {
 		return
 	}
-	// In sell-target mode the response pins the price below the retail average
-	// buy price; pump buys while retail still holds would immediately undo
-	// that. Accumulation resumes on its own once retail is flat again.
-	if e.cfg.RetailResponseName() == RetailResponseTarget && e.cfg.RetailTargetRatio < 0 &&
-		e.monitor.Snapshot().RetailNetTokens.Sign() > 0 {
+	// Target mode: ratio <= 0 means do not pump while retail still holds
+	// (0 = freeze; negative = sell-to-target then freeze). Positive ratio
+	// is a one-shot buy-up and does not block later accumulation.
+	if e.pumpPausedForRetailHold() {
+		if !e.retailHoldLogged {
+			e.log.Info("retail still holds; pausing buys until they exit",
+				"retail_net_tokens", e.monitor.Snapshot().RetailNetTokens.String(),
+				"target_ratio", e.cfg.RetailTargetRatio)
+			e.retailHoldLogged = true
+		}
 		return
+	}
+	if e.retailHoldLogged {
+		e.log.Info("retail position flat; resuming accumulation")
+		e.retailHoldLogged = false
 	}
 	e.buyRoundMu.Lock()
 	if e.buyRoundRunning {
@@ -1047,6 +1057,20 @@ func (e *Engine) startAccumulationRound(ctx context.Context) {
 		}()
 		e.accumulateStep(roundCtx, ctx)
 	}()
+}
+
+// pumpPausedForRetailHold is true in price-target mode when ratio is 0 or
+// negative and outside buyers still have a net token position. Ratio 0 is a
+// freeze (no buy, no sell); negative already sold toward the target and must
+// not pump the remaining holders.
+func (e *Engine) pumpPausedForRetailHold() bool {
+	if e.cfg == nil || e.monitor == nil {
+		return false
+	}
+	if e.cfg.RetailResponseName() != RetailResponseTarget || e.cfg.RetailTargetRatio > 0 {
+		return false
+	}
+	return e.monitor.Snapshot().RetailNetTokens.Sign() > 0
 }
 
 func (e *Engine) interruptBuys() {
