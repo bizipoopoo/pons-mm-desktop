@@ -24,6 +24,8 @@ import (
 const (
 	vaultVersion = 1
 	maxWallets   = 2_000
+	// KindFunding marks a vault record used only for native-coin routing.
+	KindFunding = "funding"
 )
 
 var vaultAAD = []byte("ponsdesk-vault-v1")
@@ -33,6 +35,7 @@ type Wallet struct {
 	ID         string `json:"id"`
 	Address    string `json:"address"`
 	Label      string `json:"label"`
+	Kind       string `json:"kind,omitempty"`
 	PrivateKey string `json:"privateKey"`
 }
 
@@ -41,6 +44,7 @@ type Summary struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
 	Label   string `json:"label"`
+	Kind    string `json:"kind,omitempty"`
 }
 
 type fileEnvelope struct {
@@ -177,6 +181,30 @@ func (s *Store) ClearAll() error {
 	return s.saveLocked()
 }
 
+// Retain keeps only the listed wallet IDs and deletes the rest. Used to wipe
+// trading keys without destroying funding routing wallets that share the vault.
+func (s *Store) Retain(ids []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.unlocked {
+		return errors.New("wallet vault is locked")
+	}
+	keep := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		keep[strings.ToLower(id)] = true
+	}
+	next := make([]Wallet, 0, len(keep))
+	for _, w := range s.wallets {
+		if keep[strings.ToLower(w.ID)] {
+			next = append(next, w)
+			continue
+		}
+		w.PrivateKey = ""
+	}
+	s.wallets = next
+	return s.saveLocked()
+}
+
 func (s *Store) clearLocked() {
 	for i := range s.wallets {
 		s.wallets[i].PrivateKey = ""
@@ -196,7 +224,7 @@ func (s *Store) Summaries() []Summary {
 	}
 	out := make([]Summary, 0, len(s.wallets))
 	for _, w := range s.wallets {
-		out = append(out, Summary{ID: w.ID, Address: w.Address, Label: w.Label})
+		out = append(out, Summary{ID: w.ID, Address: w.Address, Label: w.Label, Kind: w.Kind})
 	}
 	return out
 }
@@ -231,7 +259,19 @@ func (s *Store) ImportPrivateKeys(input, labelPrefix string) ([]Summary, error) 
 	if len(parts) == 0 {
 		return nil, errors.New("no private keys supplied")
 	}
-	return s.importKeys(parts, labelPrefix)
+	return s.importKeys(parts, labelPrefix, "")
+}
+
+// ImportFundingKeys stores generated routing keys tagged so they never appear
+// as trading wallets.
+func (s *Store) ImportFundingKeys(input, labelPrefix string) ([]Summary, error) {
+	parts := strings.FieldsFunc(input, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ',' || r == ';' || r == ' ' || r == '\t'
+	})
+	if len(parts) == 0 {
+		return nil, errors.New("no private keys supplied")
+	}
+	return s.importKeys(parts, labelPrefix, KindFunding)
 }
 
 // ImportMnemonic derives standard EVM accounts at m/44'/60'/0'/0/i. The
@@ -262,7 +302,7 @@ func (s *Store) ImportMnemonic(mnemonic string, count int, labelPrefix string) (
 		}
 		keys = append(keys, key)
 	}
-	return s.importKeys(keys, labelPrefix)
+	return s.importKeys(keys, labelPrefix, "")
 }
 
 func GenerateMnemonic() (string, error) {
@@ -273,7 +313,7 @@ func GenerateMnemonic() (string, error) {
 	return bip39.NewMnemonic(entropy)
 }
 
-func (s *Store) importKeys(keys []string, labelPrefix string) ([]Summary, error) {
+func (s *Store) importKeys(keys []string, labelPrefix, kind string) ([]Summary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.unlocked {
@@ -303,9 +343,9 @@ func (s *Store) importKeys(keys []string, labelPrefix string) ([]Summary, error)
 		canonical := hex.EncodeToString(crypto.FromECDSA(key))
 		id := strings.ToLower(address)
 		label := fmt.Sprintf("%s %02d", strings.TrimSpace(labelPrefix), len(s.wallets)+1)
-		record := Wallet{ID: id, Address: address, Label: label, PrivateKey: canonical}
+		record := Wallet{ID: id, Address: address, Label: label, Kind: kind, PrivateKey: canonical}
 		s.wallets = append(s.wallets, record)
-		added = append(added, Summary{ID: id, Address: address, Label: label})
+		added = append(added, Summary{ID: id, Address: address, Label: label, Kind: kind})
 		existing[id] = true
 	}
 	if len(added) == 0 {

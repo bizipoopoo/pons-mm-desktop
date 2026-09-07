@@ -531,6 +531,7 @@ export namespace vault {
 	    id: string;
 	    address: string;
 	    label: string;
+	    kind: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Summary(source);
@@ -541,6 +542,7 @@ export namespace vault {
 	        this.id = source["id"];
 	        this.address = source["address"];
 	        this.label = source["label"];
+	        this.kind = source["kind"];
 	    }
 	}
 

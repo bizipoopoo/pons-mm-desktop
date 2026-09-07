@@ -17,6 +17,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	hdwallet "github.com/miguelmota/go-ethereum-hdwallet"
 	"github.com/tyler-smith/go-bip39"
+
+	"github.com/bizipoopoo/pons-mm-desktop/internal/vault"
 )
 
 const (
@@ -54,6 +56,41 @@ type FundingConfig struct {
 func (c FundingConfig) Complete() bool {
 	return c.DepositCold != nil && len(c.DepositRelays) == fundingRelayCount &&
 		len(c.WithdrawRelays) == fundingRelayCount && c.WithdrawCold != ""
+}
+
+func (c FundingConfig) walletIDs() map[string]bool {
+	out := make(map[string]bool, 1+len(c.DepositRelays)+len(c.WithdrawRelays))
+	if c.DepositCold != nil {
+		out[strings.ToLower(c.DepositCold.ID)] = true
+	}
+	for _, w := range c.DepositRelays {
+		out[strings.ToLower(w.ID)] = true
+	}
+	for _, w := range c.WithdrawRelays {
+		out[strings.ToLower(w.ID)] = true
+	}
+	return out
+}
+
+// isFundingRouting reports whether a vault record is a deposit/withdraw
+// routing wallet rather than a trading account.
+func isFundingRouting(w vault.Summary) bool {
+	if w.Kind == vault.KindFunding {
+		return true
+	}
+	label := strings.ToLower(strings.TrimSpace(w.Label))
+	return strings.HasPrefix(label, "fund deposit") || strings.HasPrefix(label, "fund withdraw")
+}
+
+func tradingSummaries(all []vault.Summary, fundingIDs map[string]bool) []vault.Summary {
+	out := make([]vault.Summary, 0, len(all))
+	for _, w := range all {
+		if fundingIDs[strings.ToLower(w.ID)] || isFundingRouting(w) {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // FundingTask is the UI-safe view of one distribution or withdrawal task.
@@ -255,7 +292,7 @@ func (s *Service) GenerateFundingWallets(role string) (FundingExport, error) {
 			PrivateKey: "0x" + hexKey,
 		})
 	}
-	added, err := s.vault.ImportPrivateKeys(strings.Join(keys, "\n"), label)
+	added, err := s.vault.ImportFundingKeys(strings.Join(keys, "\n"), label)
 	if err != nil {
 		return FundingExport{}, err
 	}

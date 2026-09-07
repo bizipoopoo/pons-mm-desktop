@@ -105,3 +105,33 @@ func TestClearAllAllowsReimport(t *testing.T) {
 		t.Fatal("clear while locked should fail")
 	}
 }
+
+func TestRetainKeepsSelectedAndFundingKind(t *testing.T) {
+	tradeKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fundKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(filepath.Join(t.TempDir(), "wallets.vault"))
+	if err := s.Create("password123"); err != nil {
+		t.Fatal(err)
+	}
+	trade, err := s.ImportPrivateKeys(hex.EncodeToString(crypto.FromECDSA(tradeKey)), "Maker")
+	if err != nil || len(trade) != 1 {
+		t.Fatalf("import trade: %v", err)
+	}
+	fund, err := s.ImportFundingKeys(hex.EncodeToString(crypto.FromECDSA(fundKey)), "Fund deposit relay")
+	if err != nil || len(fund) != 1 || fund[0].Kind != KindFunding {
+		t.Fatalf("import funding: %v %+v", err, fund)
+	}
+	if err := s.Retain([]string{fund[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Summaries()
+	if len(got) != 1 || got[0].ID != fund[0].ID || got[0].Kind != KindFunding {
+		t.Fatalf("retain: %+v", got)
+	}
+}

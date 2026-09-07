@@ -7,6 +7,19 @@ import (
 	"github.com/bizipoopoo/pons-mm-desktop/internal/vault"
 )
 
+func TestTradingSummariesOmitFunding(t *testing.T) {
+	all := []vault.Summary{
+		{ID: "maker", Label: "Maker 01"},
+		{ID: "cold", Label: "Fund deposit cold 01"},
+		{ID: "relay", Label: "Maker 02", Kind: vault.KindFunding},
+		{ID: "source", Label: "Withdraw source 01"},
+	}
+	got := tradingSummaries(all, map[string]bool{"cold": true})
+	if len(got) != 2 || got[0].ID != "maker" || got[1].ID != "source" {
+		t.Fatalf("trading = %+v", got)
+	}
+}
+
 func TestRandomNearEvenSplitSumsExactly(t *testing.T) {
 	total := big.NewInt(1_000_000_000_000_007)
 	for _, n := range []int{1, 3, 10, 100} {

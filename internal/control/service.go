@@ -109,7 +109,7 @@ func (s *Service) Bootstrap() Bootstrap {
 	s.mu.RUnlock()
 	return Bootstrap{
 		Settings: settings, Strategies: strategies, Jobs: jobs, Logs: logs,
-		Vault:   VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.vault.Summaries()},
+		Vault:   VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.tradingSummaries()},
 		Init:    init,
 		Funding: s.FundingState(),
 	}
@@ -144,6 +144,9 @@ func (s *Service) SaveStrategy(strategy Strategy) (Strategy, error) {
 	}
 	if strategy.Mode != ModeLaunch && strategy.Mode != ModeExisting {
 		return Strategy{}, errors.New("strategy mode is invalid")
+	}
+	if err := s.ensureTradingWalletIDs(strategy.WalletIDs); err != nil {
+		return Strategy{}, err
 	}
 	saved, err := s.config.saveStrategy(strategy)
 	if err == nil {
@@ -210,10 +213,9 @@ func (s *Service) ImportMnemonic(mnemonic string, count int, labelPrefix string)
 	return added, err
 }
 
-// ClearWallets wipes every key in the vault so a new set can be imported.
-// Strategy assignments and funding routing wallets (which live in the same
-// vault) are reset. The withdraw-cold address is kept because the app never
-// stores its key. Refused while any strategy or funding task is running.
+// ClearWallets removes imported trading keys so a new set can be imported.
+// Funding routing wallets that share the vault are kept. Strategy wallet
+// assignments are cleared. Refused while any strategy or funding task is running.
 func (s *Service) ClearWallets() error {
 	s.mu.RLock()
 	for _, job := range s.jobs {
@@ -227,23 +229,18 @@ func (s *Service) ClearWallets() error {
 		return errors.New("stop funding tasks before clearing wallets")
 	}
 	s.mu.RUnlock()
-	if err := s.vault.ClearAll(); err != nil {
+	keep := make([]string, 0)
+	for id := range s.fundingRoutingIDs() {
+		keep = append(keep, id)
+	}
+	if err := s.vault.Retain(keep); err != nil {
 		return err
 	}
 	if err := s.config.clearAllWalletIDs(); err != nil {
 		return err
 	}
-	if err := s.funding.updateConfig(func(cfg *FundingConfig) error {
-		cfg.DepositCold = nil
-		cfg.DepositRelays = nil
-		cfg.WithdrawRelays = nil
-		return nil
-	}); err != nil {
-		return err
-	}
 	s.emitVault()
 	s.emitEvent("config-updated", nil)
-	s.emitFunding()
 	return nil
 }
 
@@ -257,6 +254,9 @@ func (s *Service) Preflight(id string) (string, error) {
 	}
 	settings := s.config.settings()
 	if err := strategy.validate(settings); err != nil {
+		return "", err
+	}
+	if err := s.ensureTradingWalletIDs(strategy.WalletIDs); err != nil {
 		return "", err
 	}
 	keys, err := s.vault.Keys(strategy.WalletIDs)
@@ -302,6 +302,9 @@ func (s *Service) Start(id, confirmation string) error {
 	}
 	settings := s.config.settings()
 	if err := strategy.validate(settings); err != nil {
+		return err
+	}
+	if err := s.ensureTradingWalletIDs(strategy.WalletIDs); err != nil {
 		return err
 	}
 	keys, err := s.vault.Keys(strategy.WalletIDs)
@@ -561,7 +564,38 @@ func (s *Service) appendLog(entry LogEntry) {
 }
 
 func (s *Service) emitVault() {
-	s.emitEvent("vault-updated", VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.vault.Summaries()})
+	s.emitEvent("vault-updated", VaultState{Exists: s.vault.Exists(), Unlocked: s.vault.IsUnlocked(), Wallets: s.tradingSummaries()})
+}
+
+func (s *Service) tradingSummaries() []vault.Summary {
+	return tradingSummaries(s.vault.Summaries(), s.fundingRoutingIDs())
+}
+
+func (s *Service) fundingRoutingIDs() map[string]bool {
+	ids := s.funding.config().walletIDs()
+	for _, w := range s.vault.Summaries() {
+		if isFundingRouting(w) {
+			ids[strings.ToLower(w.ID)] = true
+		}
+	}
+	return ids
+}
+
+func (s *Service) ensureTradingWalletIDs(ids []string) error {
+	funding := s.fundingRoutingIDs()
+	byID := make(map[string]vault.Summary, len(ids))
+	for _, w := range s.vault.Summaries() {
+		byID[w.ID] = w
+	}
+	for _, id := range ids {
+		if funding[strings.ToLower(id)] {
+			return errors.New("funding routing wallets cannot be used for market making")
+		}
+		if w, ok := byID[id]; ok && isFundingRouting(w) {
+			return errors.New("funding routing wallets cannot be used for market making")
+		}
+	}
+	return nil
 }
 
 func (s *Service) emitJob(status JobStatus) { s.emitEvent("job-updated", status) }
