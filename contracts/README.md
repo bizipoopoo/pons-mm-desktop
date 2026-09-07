@@ -55,3 +55,14 @@ regenerate the app's ABI slice (`mmRouterABIJSON` in `internal/pons/abi.go`)
 from `out/PonsMMRouter.sol/PonsMMRouter.json`.
 
 Mainnet: proxy `0x1119cDed80b82CA4d732fD1bB20c13f5e9425F60`.
+
+## Balance lens
+
+`PonsBalanceLens` is a stateless view helper: one `eth_call` returns native
+ETH and optional ERC-20 balances for an array of accounts. The desktop app
+injects its bytecode with `eth_call` state override, so a deployment is not
+required. If an RPC rejects state overrides, deploy it:
+
+```sh
+forge script script/DeployBalanceLens.s.sol --rpc-url robinhood --broadcast
+```

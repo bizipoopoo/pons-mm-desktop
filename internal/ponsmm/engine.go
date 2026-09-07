@@ -761,22 +761,18 @@ func (e *Engine) Run(ctx context.Context) error {
 		<-monitorDone
 	}()
 
-	// The three startup reads are independent; run them concurrently so the
-	// event loop (which acts on retail trades) starts as soon as possible.
+	// Balances are one PonsBalanceLens eth_call (ETH + token); reserves are
+	// independent and refresh alongside it.
 	startupReads := func() error {
-		var ethErr, tokErr error
+		var snapErr error
 		var initWg sync.WaitGroup
-		initWg.Add(2)
-		go func() { defer initWg.Done(); ethErr = e.pool.RefreshETH(ctx) }()
-		go func() { defer initWg.Done(); tokErr = e.pool.RefreshToken(ctx, e.token) }()
+		initWg.Add(1)
+		go func() { defer initWg.Done(); snapErr = e.pool.RefreshSnapshot(ctx, e.token) }()
 		if err := e.monitor.RefreshReserves(ctx); err != nil {
 			e.log.Warn("initial reserve refresh failed", "err", err)
 		}
 		initWg.Wait()
-		if ethErr != nil {
-			return ethErr
-		}
-		return tokErr
+		return snapErr
 	}
 	defer e.finalizeStats()
 	e.lastFundsRefresh = time.Now()

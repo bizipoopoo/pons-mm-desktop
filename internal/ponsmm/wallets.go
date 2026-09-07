@@ -196,66 +196,77 @@ func (p *Pool) IsOurs(addr common.Address) bool {
 	return ok
 }
 
-// forEachWallet runs fn for every wallet concurrently and returns the first
-// error. Serial per-wallet RPC round trips used to cost 1-2s each; with ten
-// wallets that added tens of seconds between a launch and the monitor loop
-// starting — a window where retail trades went unanswered.
-func (p *Pool) forEachWallet(fn func(w *Wallet) error) error {
-	wallets := p.All()
-	errs := make([]error, len(wallets))
-	var wg sync.WaitGroup
+func walletAddrs(wallets []*Wallet) []common.Address {
+	out := make([]common.Address, len(wallets))
 	for i, w := range wallets {
-		wg.Add(1)
-		go func(i int, w *Wallet) {
-			defer wg.Done()
-			errs[i] = fn(w)
-		}(i, w)
+		out[i] = w.Addr
 	}
-	wg.Wait()
-	for _, err := range errs {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return out
 }
 
-// RefreshETH reads every wallet's native balance and pending nonce.
-func (p *Pool) RefreshETH(ctx context.Context) error {
-	return p.forEachWallet(func(w *Wallet) error {
-		bal, err := p.Client.EthBalance(ctx, w.Addr)
-		if err != nil {
-			return fmt.Errorf("balance %s: %w", w.Addr.Hex(), err)
-		}
-		w.setETHBalance(bal)
-		n, err := p.Client.PendingNonce(ctx, w.Addr)
-		if err != nil {
-			return fmt.Errorf("nonce %s: %w", w.Addr.Hex(), err)
-		}
+func (p *Pool) applyNonces(ctx context.Context, wallets []*Wallet, addrs []common.Address) error {
+	nonces, err := p.Client.PendingNonces(ctx, addrs)
+	if err != nil {
+		return fmt.Errorf("nonces: %w", err)
+	}
+	for i, w := range wallets {
 		// Only ever advance the cached nonce. A launch fires the burst buys and
 		// their sell approvals asynchronously, so a refresh that races those
 		// in-flight sends can read a pending nonce that has not yet caught up —
 		// writing it back verbatim would rewind the counter and make the next
 		// send collide with an already-used nonce ("nonce too low").
 		w.txMu.Lock()
-		if n > w.Nonce {
-			w.Nonce = n
+		if nonces[i] > w.Nonce {
+			w.Nonce = nonces[i]
 		}
 		w.txMu.Unlock()
-		return nil
-	})
+	}
+	return nil
 }
 
-// RefreshToken reads every wallet's launch-token balance.
+// RefreshETH reads every wallet's native balance in one PonsBalanceLens
+// eth_call, then pending nonces in small JSON-RPC batches. The old per-wallet
+// goroutine fan-out issued 2N RPCs at once and tripped 50/s provider caps
+// even when buys themselves were serial and slow.
+func (p *Pool) RefreshETH(ctx context.Context) error {
+	wallets := p.All()
+	addrs := walletAddrs(wallets)
+	bals, err := p.Client.EthBalances(ctx, addrs)
+	if err != nil {
+		return fmt.Errorf("eth balances: %w", err)
+	}
+	for i, w := range wallets {
+		w.setETHBalance(bals[i])
+	}
+	return p.applyNonces(ctx, wallets, addrs)
+}
+
+// RefreshToken reads every wallet's launch-token balance in one eth_call.
 func (p *Pool) RefreshToken(ctx context.Context, token common.Address) error {
-	return p.forEachWallet(func(w *Wallet) error {
-		bal, err := p.Client.TokenBalance(ctx, token, w.Addr)
-		if err != nil {
-			return fmt.Errorf("token balance %s: %w", w.Addr.Hex(), err)
-		}
-		w.setTokenBalance(bal)
-		return nil
-	})
+	wallets := p.All()
+	bals, err := p.Client.TokenBalances(ctx, token, walletAddrs(wallets))
+	if err != nil {
+		return fmt.Errorf("token balances: %w", err)
+	}
+	for i, w := range wallets {
+		w.setTokenBalance(bals[i])
+	}
+	return nil
+}
+
+// RefreshSnapshot reads native + token balances in one eth_call, then nonces.
+func (p *Pool) RefreshSnapshot(ctx context.Context, token common.Address) error {
+	wallets := p.All()
+	addrs := walletAddrs(wallets)
+	native, tokens, err := p.Client.SnapshotBalances(ctx, token, addrs)
+	if err != nil {
+		return fmt.Errorf("snapshot balances: %w", err)
+	}
+	for i, w := range wallets {
+		w.setETHBalance(native[i])
+		w.setTokenBalance(tokens[i])
+	}
+	return p.applyNonces(ctx, wallets, addrs)
 }
 
 // totalETH sums the cached native balances across all wallets.
