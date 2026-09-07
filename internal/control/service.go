@@ -210,6 +210,43 @@ func (s *Service) ImportMnemonic(mnemonic string, count int, labelPrefix string)
 	return added, err
 }
 
+// ClearWallets wipes every key in the vault so a new set can be imported.
+// Strategy assignments and funding routing wallets (which live in the same
+// vault) are reset. The withdraw-cold address is kept because the app never
+// stores its key. Refused while any strategy or funding task is running.
+func (s *Service) ClearWallets() error {
+	s.mu.RLock()
+	for _, job := range s.jobs {
+		if job.active {
+			s.mu.RUnlock()
+			return errors.New("stop all strategies before clearing wallets")
+		}
+	}
+	if len(s.fundingRuns) > 0 {
+		s.mu.RUnlock()
+		return errors.New("stop funding tasks before clearing wallets")
+	}
+	s.mu.RUnlock()
+	if err := s.vault.ClearAll(); err != nil {
+		return err
+	}
+	if err := s.config.clearAllWalletIDs(); err != nil {
+		return err
+	}
+	if err := s.funding.updateConfig(func(cfg *FundingConfig) error {
+		cfg.DepositCold = nil
+		cfg.DepositRelays = nil
+		cfg.WithdrawRelays = nil
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.emitVault()
+	s.emitEvent("config-updated", nil)
+	s.emitFunding()
+	return nil
+}
+
 func (s *Service) GenerateMnemonic() (string, error) { return vault.GenerateMnemonic() }
 
 // Preflight performs only RPC reads and transaction construction checks.

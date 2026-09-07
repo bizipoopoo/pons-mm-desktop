@@ -196,6 +196,8 @@ export namespace control {
 	    startBalance: string;
 	    endBalance: string;
 	    profit: string;
+	    markBalance: string;
+	    estimatedProfit: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new JobStats(source);
@@ -212,6 +214,8 @@ export namespace control {
 	        this.startBalance = source["startBalance"];
 	        this.endBalance = source["endBalance"];
 	        this.profit = source["profit"];
+	        this.markBalance = source["markBalance"];
+	        this.estimatedProfit = source["estimatedProfit"];
 	    }
 	}
 	export class JobStatus {

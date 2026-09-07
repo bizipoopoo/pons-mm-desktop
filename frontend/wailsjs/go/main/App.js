@@ -6,6 +6,10 @@ export function Bootstrap() {
   return window['go']['main']['App']['Bootstrap']();
 }
 
+export function ClearWallets() {
+  return window['go']['main']['App']['ClearWallets']();
+}
+
 export function CreateFundingTask(arg1, arg2) {
   return window['go']['main']['App']['CreateFundingTask'](arg1, arg2);
 }

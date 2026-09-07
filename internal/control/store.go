@@ -123,6 +123,17 @@ func (s *configStore) saveStrategy(strategy Strategy) (Strategy, error) {
 	return strategy, nil
 }
 
+func (s *configStore) clearAllWalletIDs() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := range s.data.Strategies {
+		s.data.Strategies[i].WalletIDs = nil
+		s.data.Strategies[i].UpdatedAt = now
+	}
+	return s.writeLocked()
+}
+
 func (s *configStore) deleteStrategy(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

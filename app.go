@@ -90,6 +90,8 @@ func (a *App) ImportMnemonic(mnemonic string, count int, labelPrefix string) ([]
 
 func (a *App) GenerateMnemonic() (string, error) { return a.service.GenerateMnemonic() }
 
+func (a *App) ClearWallets() error { return a.service.ClearWallets() }
+
 func (a *App) PreflightStrategy(id string) (string, error) { return a.service.Preflight(id) }
 func (a *App) StartStrategy(id, confirmation string) error { return a.service.Start(id, confirmation) }
 func (a *App) StopStrategy(id string) error                { return a.service.Stop(id) }

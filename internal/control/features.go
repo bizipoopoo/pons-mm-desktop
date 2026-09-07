@@ -193,6 +193,12 @@ func jobStatsFrom(st ponsmm.Stats) *JobStats {
 	if st.StartBalanceWei != nil {
 		out.StartBalance = weiToEth(st.StartBalanceWei)
 	}
+	if st.MarkBalanceWei != nil {
+		out.MarkBalance = weiToEth(st.MarkBalanceWei)
+	}
+	if st.EstimatedProfitWei != nil {
+		out.EstimatedProfit = weiToEth(st.EstimatedProfitWei)
+	}
 	if st.EndBalanceWei != nil {
 		out.EndBalance = weiToEth(st.EndBalanceWei)
 		if st.StartBalanceWei != nil {

@@ -32,6 +32,12 @@ type Stats struct {
 	// EndBalanceWei is the same sum captured when the run finished; nil while
 	// the strategy is still running.
 	EndBalanceWei *big.Int
+	// MarkBalanceWei is remaining ETH plus a quoted full-exit of current
+	// token holdings; nil until the first mark-to-market tick.
+	MarkBalanceWei *big.Int
+	// EstimatedProfitWei is MarkBalanceWei minus StartBalanceWei; nil until
+	// both sides are known. Sell-side gas is not deducted.
+	EstimatedProfitWei *big.Int
 }
 
 // TotalCostWei is gas + launch fee: everything paid on top of swap notional.
@@ -102,6 +108,8 @@ func cloneStats(s Stats) Stats {
 	out.LaunchFeeWei = cloneInt(s.LaunchFeeWei)
 	out.StartBalanceWei = cloneInt(s.StartBalanceWei)
 	out.EndBalanceWei = cloneInt(s.EndBalanceWei)
+	out.MarkBalanceWei = cloneInt(s.MarkBalanceWei)
+	out.EstimatedProfitWei = cloneInt(s.EstimatedProfitWei)
 	return out
 }
 
@@ -169,6 +177,49 @@ func (e *Engine) captureStartBalance() {
 		if s.StartBalanceWei == nil {
 			s.StartBalanceWei = total
 		}
+	})
+}
+
+// markToMarket is remaining ETH plus a quoted full token exit, compared to
+// the ETH total captured at run start. Sell-side gas is not deducted.
+func markToMarket(ethNow, quotedExit, start *big.Int) (mark, profit *big.Int) {
+	if ethNow == nil {
+		ethNow = big.NewInt(0)
+	}
+	if quotedExit == nil {
+		quotedExit = big.NewInt(0)
+	}
+	mark = new(big.Int).Add(ethNow, quotedExit)
+	if start == nil {
+		return mark, nil
+	}
+	return mark, new(big.Int).Sub(mark, start)
+}
+
+// refreshMarkToMarket quotes a full exit of current token holdings and
+// records estimated round P&L against the start ETH snapshot.
+func (e *Engine) refreshMarkToMarket(ctx context.Context) {
+	if e.pool == nil {
+		return
+	}
+	snap := e.StatsSnapshot()
+	if snap.StartBalanceWei == nil {
+		return
+	}
+	tokens := e.pool.TotalTokens()
+	quoted := big.NewInt(0)
+	if tokens.Sign() > 0 {
+		out, err := e.quoteSell(ctx, tokens)
+		if err != nil {
+			e.log.Warn("mark-to-market quote failed", "err", err)
+			return
+		}
+		quoted = out
+	}
+	mark, profit := markToMarket(e.pool.totalETH(), quoted, snap.StartBalanceWei)
+	e.mutateStats(func(s *Stats) {
+		s.MarkBalanceWei = mark
+		s.EstimatedProfitWei = profit
 	})
 }
 

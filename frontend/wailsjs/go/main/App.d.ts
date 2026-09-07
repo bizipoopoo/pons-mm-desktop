@@ -5,6 +5,8 @@ import {vault} from '../models';
 
 export function Bootstrap():Promise<control.Bootstrap>;
 
+export function ClearWallets():Promise<void>;
+
 export function CreateFundingTask(arg1:string,arg2:string):Promise<control.FundingTask>;
 
 export function CreateVault(arg1:string):Promise<void>;

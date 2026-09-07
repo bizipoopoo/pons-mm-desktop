@@ -213,18 +213,20 @@ type JobStatus struct {
 }
 
 // JobStats is the per-strategy execution dashboard: trade counts, volumes,
-// total overhead paid, and the round's realized profit once the run ends.
-// All ETH values are decimal strings.
+// total overhead paid, a live mark-to-market estimate while running, and the
+// round's realized profit once the run ends. All ETH values are decimal strings.
 type JobStats struct {
-	BuyCount     int64  `json:"buyCount"`
-	SellCount    int64  `json:"sellCount"`
-	EthSpent     string `json:"ethSpent"`     // ETH paid into buys
-	EthReceived  string `json:"ethReceived"`  // ETH received from sells
-	TokensSold   string `json:"tokensSold"`   // whole tokens sold
-	TotalCost    string `json:"totalCost"`    // gas + priority tips + launch fee
-	StartBalance string `json:"startBalance"` // summed wallet ETH at start
-	EndBalance   string `json:"endBalance"`   // summed wallet ETH at finish; empty while running
-	Profit       string `json:"profit"`       // end - start; empty while running
+	BuyCount        int64  `json:"buyCount"`
+	SellCount       int64  `json:"sellCount"`
+	EthSpent        string `json:"ethSpent"`        // ETH paid into buys
+	EthReceived     string `json:"ethReceived"`     // ETH received from sells
+	TokensSold      string `json:"tokensSold"`      // whole tokens sold
+	TotalCost       string `json:"totalCost"`       // gas + priority tips + launch fee
+	StartBalance    string `json:"startBalance"`    // summed wallet ETH at start
+	EndBalance      string `json:"endBalance"`      // summed wallet ETH at finish; empty while running
+	Profit          string `json:"profit"`          // end - start; empty while running
+	MarkBalance     string `json:"markBalance"`     // remaining ETH + quoted full exit
+	EstimatedProfit string `json:"estimatedProfit"` // mark - start; empty until first tick
 }
 
 // InitStatus is the result of the application's startup initialization check.

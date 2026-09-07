@@ -7,7 +7,7 @@ import {
     Trash2, Upload, WalletCards, X,
 } from 'lucide-react';
 import {
-    Bootstrap, CreateFundingTask, CreateVault, DeleteFundingTask, DeleteStrategy, ExitStrategy,
+    Bootstrap, CreateFundingTask, CreateVault, ClearWallets, DeleteFundingTask, DeleteStrategy, ExitStrategy,
     ExportFundingBatches, ExportGMGN, FetchLatestLaunch, GenerateFundingWallets, GenerateMnemonic,
     ImportMnemonic, ImportPrivateKeys, LockVault, NewStrategy, PreflightStrategy, ResetStrategy,
     RunInitCheck, SaveSettings, SaveStrategy, SetFundingWithdrawCold, StartFundingTask,
@@ -142,7 +142,7 @@ function App() {
                 {page === 'overview' && <Overview data={data} jobs={jobs} onNavigate={setPage} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget}/>}
                 {page === 'strategies' && <Strategies data={data} jobs={jobs} busy={busy} onAdd={addStrategy} onEdit={setEditing} onStart={setLiveTarget} onStop={stop} onExit={setExitTarget} onPreflight={preflight} onReset={setResetTarget} notify={notify}/>}
                 {page === 'funding' && <FundingPage state={data.funding} vaultUnlocked={data.vault.unlocked} wallets={data.vault.wallets || []} notify={notify} onNavigate={setPage}/>}
-                {page === 'wallets' && <WalletVault state={data.vault} notify={notify}/>}
+                {page === 'wallets' && <WalletVault state={data.vault} blocked={activeCount > 0 || (data.funding?.tasks || []).some(t => t.state === 'running')} notify={notify}/>}
                 {page === 'logs' && <Logs logs={data.logs || []} strategies={data.strategies || []}/>}
                 {page === 'settings' && <SettingsPage initial={data.settings} funding={data.funding} vaultUnlocked={data.vault.unlocked} notify={notify}/>}
             </div>
@@ -256,7 +256,15 @@ function Strategies({data, jobs, busy, onAdd, onEdit, onStart, onStop, onExit, o
 
 function StatsPanel({stats, state}: {stats?: control.JobStats; state?: string}) {
     if (!stats) return <div className="stats-panel"><Empty text="No execution stats yet — they appear once the strategy runs"/></div>;
-    const profit = stats.profit ? Number(stats.profit) : null;
+    const realized = stats.profit ? Number(stats.profit) : null;
+    const estimated = stats.estimatedProfit ? Number(stats.estimatedProfit) : null;
+    const pnl = realized != null && Number.isFinite(realized) ? realized : (estimated != null && Number.isFinite(estimated) ? estimated : null);
+    const live = realized == null && pnl != null;
+    const hint = realized != null
+        ? `start ${trimNum(stats.startBalance)} → end ${trimNum(stats.endBalance)} ETH`
+        : live
+            ? `est. mark ${trimNum(stats.markBalance)} vs start ${trimNum(stats.startBalance)} ETH (quoted full exit, before sell gas)`
+            : (stats.startBalance ? `start ${trimNum(stats.startBalance)} ETH` : 'balance snapshot at start vs finish');
     return <div className="stats-panel">
         <div className="stats-grid">
             <StatCell label="Buys" value={String(stats.buyCount ?? 0)} hint="confirmed buy transactions"/>
@@ -264,9 +272,9 @@ function StatsPanel({stats, state}: {stats?: control.JobStats; state?: string}) 
             <StatCell label="ETH in" value={`${trimNum(stats.ethSpent)} ETH`} hint="ETH paid into buys"/>
             <StatCell label="Tokens sold" value={trimNum(stats.tokensSold)} hint={`received ${trimNum(stats.ethReceived)} ETH`}/>
             <StatCell label="Total cost" value={`${trimNum(stats.totalCost)} ETH`} hint="gas + tips + launch fee"/>
-            <StatCell label="Round P&L" tone={profit == null ? '' : profit >= 0 ? 'pos' : 'neg'}
-                value={profit == null ? (isActive(state) ? 'Running…' : '—') : `${profit >= 0 ? '+' : ''}${trimNum(stats.profit)} ETH`}
-                hint={stats.startBalance ? `start ${trimNum(stats.startBalance)}${stats.endBalance ? ` → end ${trimNum(stats.endBalance)}` : ''} ETH` : 'balance snapshot at start vs finish'}/>
+            <StatCell label={live ? 'Est. P&L' : 'Round P&L'} tone={pnl == null ? '' : pnl >= 0 ? 'pos' : 'neg'}
+                value={pnl == null ? (isActive(state) ? 'Running…' : '—') : `${pnl >= 0 ? '+' : ''}${trimNum(live ? stats.estimatedProfit : stats.profit)} ETH`}
+                hint={hint}/>
         </div>
     </div>;
 }
@@ -404,16 +412,23 @@ function StrategyDialog({strategy, wallets, onClose, onSaved, notify}: {
     </Modal>;
 }
 
-function WalletVault({state, notify}: {state: control.VaultState; notify: (k: Toast['kind'], t: string) => void}) {
+function WalletVault({state, blocked, notify}: {state: control.VaultState; blocked: boolean; notify: (k: Toast['kind'], t: string) => void}) {
     const [password, setPassword] = useState(''); const [show, setShow] = useState(false); const [busy, setBusy] = useState(false);
     const [mode, setMode] = useState<'keys' | 'mnemonic'>('keys'); const [input, setInput] = useState(''); const [count, setCount] = useState(10); const [prefix, setPrefix] = useState('Maker'); const [generated, setGenerated] = useState('');
+    const [confirmClear, setConfirmClear] = useState(false);
     const unlock = async () => { setBusy(true); try { state.exists ? await UnlockVault(password) : await CreateVault(password); setPassword(''); notify('success', state.exists ? 'Vault unlocked' : 'Encrypted vault created'); } catch (e) { notify('error', String(e)); } finally { setBusy(false); } };
     const lock = async () => { try { await LockVault(); notify('success', 'Vault locked'); } catch (e) { notify('error', String(e)); } };
     const importWallets = async () => { setBusy(true); try { const added = mode === 'keys' ? await ImportPrivateKeys(input, prefix) : await ImportMnemonic(input, count, prefix); setInput(''); notify('success', `Imported ${added.length} wallets`); } catch (e) { notify('error', String(e)); } finally { setBusy(false); } };
     const generate = async () => { try { setGenerated(await GenerateMnemonic()); } catch (e) { notify('error', String(e)); } };
+    const clearWallets = async () => {
+        setBusy(true);
+        try { await ClearWallets(); setConfirmClear(false); notify('success', 'All wallets cleared — you can import a new set'); }
+        catch (e) { notify('error', String(e)); }
+        finally { setBusy(false); }
+    };
     if (!state.unlocked) return <section className="vault-gate"><div className="vault-symbol"><KeyRound size={28}/></div><h2>{state.exists ? 'Unlock wallet vault' : 'Create encrypted wallet vault'}</h2><p>Trading keys stay encrypted in the local PonsDesk data directory.</p><div className="password-input"><input type={show ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === 'Enter' && unlock()} placeholder="Vault password"/><button title={show ? 'Hide password' : 'Show password'} onClick={() => setShow(!show)}>{show ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div><button className="primary" disabled={busy || password.length < 8} onClick={unlock}>{state.exists ? <LockOpen size={16}/> : <ShieldCheck size={16}/>} {busy ? 'Working' : state.exists ? 'Unlock vault' : 'Create vault'}</button></section>;
     return <div className="wallet-layout">
-        <section className="section-block wallet-table"><div className="section-heading"><div><h2>Wallet inventory</h2><p>{state.wallets?.length || 0} encrypted EVM signing accounts</p></div><button className="secondary" onClick={lock}><Lock size={16}/> Lock</button></div>
+        <section className="section-block wallet-table"><div className="section-heading"><div><h2>Wallet inventory</h2><p>{state.wallets?.length || 0} encrypted EVM signing accounts</p></div><div className="heading-actions"><button className="danger" disabled={busy || blocked || !(state.wallets?.length)} title={blocked ? 'Stop strategies and funding tasks first' : 'Remove every imported key so a new set can be imported'} onClick={() => setConfirmClear(true)}><Trash2 size={16}/> Clear all</button><button className="secondary" onClick={lock}><Lock size={16}/> Lock</button></div></div>
             <div className="data-table"><div className="table-head"><span>Label</span><span>Address</span><span>Source</span></div>{(state.wallets || []).map(w => <div className="table-row" key={w.id}><div className="name-cell"><span className="wallet-avatar"><WalletCards size={16}/></span><strong>{w.label}</strong></div><span className="mono full-address">{w.address}</span><span className="mode-tag">Encrypted</span></div>)}</div>
         </section>
         <section className="section-block import-panel"><div className="section-heading"><div><h2>Import wallets</h2><p>New keys are encrypted immediately.</p></div></div><div className="segmented"><button className={mode === 'keys' ? 'active' : ''} onClick={() => setMode('keys')}>Private keys</button><button className={mode === 'mnemonic' ? 'active' : ''} onClick={() => setMode('mnemonic')}>Mnemonic</button></div>
@@ -422,6 +437,7 @@ function WalletVault({state, notify}: {state: control.VaultState; notify: (k: To
             <button className="primary wide-button" disabled={busy || !input.trim()} onClick={importWallets}><Upload size={16}/>{busy ? 'Importing' : 'Import and encrypt'}</button>
         </section>
         {generated && <Modal title="New recovery phrase" subtitle="This phrase is shown once and is not stored by PonsDesk." onClose={() => setGenerated('')}><div className="recovery-phrase">{generated}</div><div className="dialog-footer"><button className="secondary" onClick={() => navigator.clipboard.writeText(generated)}><Copy size={16}/> Copy</button><button className="primary" onClick={() => {setInput(generated); setGenerated('');}}>Use this phrase</button></div></Modal>}
+        {confirmClear && <ConfirmDialog title="Clear all wallets" message="This permanently deletes every imported private key from this computer. Strategy wallet assignments and funding routing wallets will be reset so you can import a new set. The withdraw-cold address is kept. You cannot undo this — make sure the keys are backed up." confirmLabel="Clear all wallets" busy={busy} onClose={() => setConfirmClear(false)} onConfirm={clearWallets}/>}
     </div>;
 }
 

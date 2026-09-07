@@ -795,6 +795,7 @@ func (e *Engine) Run(ctx context.Context) error {
 				e.log.Warn("background startup refresh failed; continuing on cached balances", "err", err)
 			}
 			e.captureStartBalance()
+			e.refreshMarkToMarket(ctx)
 		}()
 	} else {
 		if err := startupReads(); err != nil {
@@ -802,6 +803,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		e.captureStartBalance()
 		e.seedMonitorFromBalances(ctx)
+		e.refreshMarkToMarket(ctx)
 	}
 
 	// Approval warming must not block the event loop. A sell can be queued behind
@@ -890,6 +892,7 @@ func (e *Engine) Run(ctx context.Context) error {
 				if err := e.monitor.RefreshReserves(ctx); err != nil {
 					e.log.Warn("reserve refresh failed", "err", err)
 				}
+				e.refreshMarkToMarket(ctx)
 			}
 		}
 		if e.state == Done {

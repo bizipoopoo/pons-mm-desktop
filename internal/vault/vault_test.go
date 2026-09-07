@@ -62,3 +62,46 @@ func TestMnemonicDerivation(t *testing.T) {
 		t.Fatalf("unexpected derivation: %+v", added)
 	}
 }
+
+func TestClearAllAllowsReimport(t *testing.T) {
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testKey := hex.EncodeToString(crypto.FromECDSA(privateKey))
+	path := filepath.Join(t.TempDir(), "wallets.vault")
+	s := New(path)
+	if err := s.Create("password123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ImportPrivateKeys(testKey, "Maker"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ImportPrivateKeys(testKey, "Maker"); err == nil {
+		t.Fatal("duplicate import should fail while the wallet is stored")
+	}
+	if err := s.ClearAll(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Summaries(); len(got) != 0 {
+		t.Fatalf("cleared vault still has %d wallets", len(got))
+	}
+	added, err := s.ImportPrivateKeys(testKey, "Maker")
+	if err != nil || len(added) != 1 {
+		t.Fatalf("reimport after clear: %v, added=%d", err, len(added))
+	}
+	s.Lock()
+	if err := s.Unlock("password123"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Summaries(); len(got) != 1 || got[0].Address != added[0].Address {
+		t.Fatalf("persisted after clear+reimport: %+v", got)
+	}
+	if err := s.ClearAll(); err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	if err := s.ClearAll(); err == nil {
+		t.Fatal("clear while locked should fail")
+	}
+}

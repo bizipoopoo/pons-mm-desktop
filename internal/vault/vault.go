@@ -164,6 +164,19 @@ func (s *Store) Lock() {
 	s.clearLocked()
 }
 
+// ClearAll removes every stored key while keeping the vault unlocked so a
+// fresh import can follow immediately. Existing vault files are rewritten
+// empty rather than deleted, so the password stays valid.
+func (s *Store) ClearAll() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.unlocked {
+		return errors.New("wallet vault is locked")
+	}
+	s.wallets = nil
+	return s.saveLocked()
+}
+
 func (s *Store) clearLocked() {
 	for i := range s.wallets {
 		s.wallets[i].PrivateKey = ""
