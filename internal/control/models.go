@@ -156,21 +156,6 @@ func (s Strategy) validate(settings Settings) error {
 	if mode := strings.ToLower(strings.TrimSpace(s.BundleMode)); mode != "" && mode != ponsmm.BundleOff {
 		bundling = true
 	}
-	if s.Mode == ModeLaunch && protocol == ponsmm.ProtocolV2 {
-		// The factory takes 32 snipe-tax exemptions. Behind the router the
-		// treasury needs one of them; an initial buy goes through the official
-		// launch-and-buy router, which appends the recipient and uses another.
-		maxMakers := 32
-		if bundling {
-			maxMakers--
-		}
-		if s.DevBuyETH > 0 {
-			maxMakers--
-		}
-		if len(s.WalletIDs) > maxMakers+1 {
-			return fmt.Errorf("this v2 launch supports the treasury plus at most %d maker wallets (bundled: %v, initial buy: %v)", maxMakers, bundling, s.DevBuyETH > 0)
-		}
-	}
 	if s.Mode == ModeExisting && (!common.IsHexAddress(s.TokenAddress) || !common.IsHexAddress(s.PoolAddress)) {
 		return errors.New("existing strategy requires valid token and pool addresses")
 	}

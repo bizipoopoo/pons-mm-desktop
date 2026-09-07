@@ -71,8 +71,11 @@ func (e *Engine) prepareLaunchBundle(ctx context.Context, params pons.V2TokenPar
 	// Filtering with fundedMakers() before RefreshETH used to drop everyone
 	// (maker_buys=0) after a prior round left the cache looking empty.
 	eligible := e.pool.Makers
+	if e.snipeExempt != nil {
+		eligible = e.filterSnipeExempt(eligible)
+	}
 	if bmode := e.cfg.BundleModeName(); bmode == BundleAtomic {
-		eligible = e.fundedMakers()
+		eligible = e.filterSnipeExempt(e.fundedMakers())
 		if !e.cfg.ConcurrentBuys && len(eligible) > 1 {
 			eligible = eligible[:1]
 		}

@@ -119,6 +119,12 @@ type Engine struct {
 	approvalMu        sync.Mutex
 	approvalReady     map[common.Address]bool
 	approvalSubmitted map[common.Address]bool
+
+	// snipeExempt is the launch-time tax-free set (nil means every wallet may
+	// buy, e.g. when binding an existing token). Makers not in the map wait
+	// until snipeTaxOpen after the opening tax decays.
+	snipeExempt  map[common.Address]struct{}
+	snipeTaxOpen bool
 }
 
 type buySettlement struct {
@@ -387,28 +393,15 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		ExpectedEconomics:   economics,
 		Salt:                salt,
 	}
-	exemptions := make([]common.Address, 0, len(e.pool.Makers)+1)
-	if deployer != who {
-		// The factory only auto-exempts the deployer and the creator fee
-		// recipient; behind the router the treasury must be listed explicitly.
-		exemptions = append(exemptions, who)
-	}
-	for _, wallet := range e.pool.Makers {
-		exemptions = append(exemptions, wallet.Addr)
-	}
-	// A non-zero initial buy routes the launch through the official
-	// launch-and-buy router: the treasury's first buy executes inside the
-	// launch transaction itself, so no sniper can trade before it.
 	devBuy := ethToWei(e.cfg.DevBuyETH)
-	// The factory accepts 32 exemptions; the official launch-and-buy router
-	// appends the buy recipient itself, leaving 31 for us (verified with
-	// eth_estimateGas: 32 reverts, 31 passes).
-	maxExemptions := 32
-	if devBuy.Sign() > 0 {
-		maxExemptions = 31
-	}
-	if len(exemptions) > maxExemptions {
-		return fmt.Errorf("this launch supports at most %d snipe-tax-exempt wallets; got %d (drop maker wallets or the initial buy)", maxExemptions, len(exemptions))
+	exemptions, exempt := selectSnipeExemptions(who, deployer, makerAddrs(e.pool.Makers), devBuy.Sign() > 0)
+	e.snipeExempt = exempt
+	e.snipeTaxOpen = false
+	deferred := 0
+	for _, w := range e.pool.Makers {
+		if !e.isSnipeExempt(w.Addr) {
+			deferred++
+		}
 	}
 	value := new(big.Int).Add(fee, devBuy)
 	gasLimit := uint64(launchV2GasLimit)
@@ -473,7 +466,11 @@ func (e *Engine) launchV2(ctx context.Context, dryRun bool) error {
 		"atomic_initial_buy_eth", weiToEthStr(devBuy), "gas_limit", gasLimit,
 		"supply", launchCfg.Supply.String(),
 		"graduation_threshold_eth", weiToEthStr(launchCfg.GraduationThreshold),
-		"snipe_exemptions", len(exemptions))
+		"snipe_exemptions", len(exemptions), "deferred_makers", deferred)
+	if deferred > 0 {
+		e.log.Info("factory snipe-tax exemption list is full; extra makers buy after the tax decays to 1%",
+			"deferred_makers", deferred, "limit_bps", snipeTaxBuyLimitBps)
+	}
 	if dryRun {
 		e.log.Info("dry-run: not sending v2 launch transaction")
 		return nil
@@ -616,9 +613,9 @@ type launchBurstBuy struct {
 // pricing is reused. This lands our wallets within the first blocks after
 // launch instead of several seconds later.
 func (e *Engine) launchBuyBurst(ctx context.Context, curve common.Address, launchPr pons.TxParams) []launchBurstBuy {
-	eligible := e.fundedMakers()
+	eligible := e.filterSnipeExempt(e.fundedMakers())
 	if len(eligible) == 0 {
-		e.log.Warn("launch buy burst skipped: no maker wallet has spendable ETH")
+		e.log.Warn("launch buy burst skipped: no snipe-tax-exempt maker has spendable ETH")
 		return nil
 	}
 	// Sequential-buy configurations still snipe with the first maker; the
@@ -1085,6 +1082,9 @@ func (e *Engine) accumulateStep(ctx, settleCtx context.Context) {
 	// example by a distribution batch), which makes it eligible again when the
 	// pump strategy resumes.
 	eligible := e.buyEligibleMakers()
+	if !e.snipeTaxCleared(ctx) {
+		eligible = e.filterSnipeExempt(eligible)
+	}
 	if len(eligible) == 0 {
 		return
 	}
@@ -1262,6 +1262,14 @@ func (e *Engine) ensureMakerFunds(ctx context.Context) bool {
 		e.fundWaitLogged = true
 	}
 	return false
+}
+
+func makerAddrs(wallets []*Wallet) []common.Address {
+	out := make([]common.Address, 0, len(wallets))
+	for _, w := range wallets {
+		out = append(out, w.Addr)
+	}
+	return out
 }
 
 func (e *Engine) fundedMakers() []*Wallet {

@@ -531,7 +531,7 @@ export namespace vault {
 	    id: string;
 	    address: string;
 	    label: string;
-	    kind: string;
+	    kind?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Summary(source);

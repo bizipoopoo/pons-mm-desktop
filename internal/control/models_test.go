@@ -1,6 +1,7 @@
 package control
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,16 +43,16 @@ func TestMissingProtocolRemainsV1(t *testing.T) {
 	}
 }
 
-func TestV2LaunchRejectsTooManyExemptions(t *testing.T) {
+func TestV2LaunchAllowsMoreWalletsThanExemptions(t *testing.T) {
 	s := NewStrategy()
-	s.Name, s.Mode = "too many", ModeLaunch
+	s.Name, s.Mode = "many wallets", ModeLaunch
 	s.Token.Name, s.Token.Symbol = "Test", "TEST"
-	for i := 0; i < 34; i++ {
-		s.WalletIDs = append(s.WalletIDs, string(rune('a'+i)))
+	s.DevBuyETH = 0.1
+	for i := 0; i < 50; i++ {
+		s.WalletIDs = append(s.WalletIDs, fmt.Sprintf("wallet-%02d", i))
 	}
-	err := s.validate(Settings{RPCEndpoint: "https://rpc.example"})
-	if err == nil {
-		t.Fatal("expected v2 wallet limit validation error")
+	if err := s.validate(Settings{RPCEndpoint: "https://rpc.example"}); err != nil {
+		t.Fatalf("v2 launch should accept extra makers beyond the exemption cap: %v", err)
 	}
 }
 
